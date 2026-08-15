@@ -1,0 +1,22 @@
+Track long-lived goals for this project. Unlike todos, goals persist across sessions and are re-surfaced at the start of every turn, so use them for intent that should outlive the current conversation.
+
+## Actions
+- `add` - record a new goal. Requires `content`.
+- `complete` - mark a goal finished. Requires `id`.
+- `abandon` - drop a goal that is no longer wanted. Requires `id`.
+- `list` - show every goal, active ones first.
+
+## When to use
+- The user states an objective that spans more than one session ("ship the auth rewrite", "get the test suite green")
+- You finish work that satisfies a goal you can see in the `<goals>` reminder - mark it `complete`
+- The user abandons a direction - mark it `abandon` instead of leaving it active
+
+## When NOT to use
+- Step-by-step tracking inside a single session - use `todowrite` instead
+- Restating something already listed in the `<goals>` reminder
+
+## Rules
+- Keep goals short and outcome-shaped; the detail belongs in todos
+- One goal per `add` call; do not batch unrelated objectives into one string
+- Use the `id` from the `<goals>` reminder or from a `list` call when completing or abandoning
+- Never invent an id

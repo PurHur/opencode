@@ -17,11 +17,13 @@ export function deriveSubagentSessionPermission(input: {
 }): PermissionV1.Ruleset {
   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
   const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
+  const canGoal = input.subagent.permission.some((rule) => rule.permission === "goal")
   return [
     ...input.parentSessionPermission.filter(
       (rule) => rule.permission === "external_directory" || rule.action === "deny",
     ),
     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+    ...(canGoal ? [] : [{ permission: "goal" as const, pattern: "*" as const, action: "deny" as const }]),
     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
   ]
 }

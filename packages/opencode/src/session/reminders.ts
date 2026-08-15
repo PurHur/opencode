@@ -8,9 +8,12 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
+import { Goal } from "./goal"
 import PROMPT_PLAN from "./prompt/plan.txt"
 import BUILD_SWITCH from "./prompt/build-switch.txt"
 import PLAN_MODE from "./prompt/plan-mode.txt"
+
+const GOAL_LIMIT = 20
 
 export const apply = Effect.fn("SessionReminders.apply")(function* (input: {
   messages: SessionV1.WithParts[]
@@ -20,8 +23,26 @@ export const apply = Effect.fn("SessionReminders.apply")(function* (input: {
   const flags = yield* RuntimeFlags.Service
   const fsys = yield* FSUtil.Service
   const sessions = yield* Session.Service
+  const goals = yield* Goal.Service
   const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
   if (!userMessage) return input.messages
+
+  const active = (yield* goals.list()).filter((goal) => goal.status === "active").slice(0, GOAL_LIMIT)
+  if (active.length > 0) {
+    userMessage.parts.push({
+      id: PartID.ascending(),
+      messageID: userMessage.info.id,
+      sessionID: userMessage.info.sessionID,
+      type: "text",
+      text: [
+        "<goals>",
+        "Persistent goals for this project. Use the goal tool to complete or abandon one when it is done.",
+        ...active.map((goal) => `- ${goal.id}: ${goal.content}`),
+        "</goals>",
+      ].join("\n"),
+      synthetic: true,
+    })
+  }
 
   if (!flags.experimentalPlanMode) {
     if (input.agent.name === "plan") {
