@@ -15,8 +15,8 @@ Progress markers: [ ] todo · [~] in progress · [x] done · [!] blocked/skipped
 - [ ] 3. workflow.ts: **small-model-friendly validation errors** via
       `formatValidationError` so a dumb model self-corrects malformed calls.
       (bundled with #1)
-- [ ] 4. tui index.tsx: workflow block **duration + counts + failure visibility**;
-      completed block keeps a useful clickable summary.
+- [x] 4. tui index.tsx: workflow block **duration + counts + failure visibility**;
+      completed block keeps a useful clickable summary. (improve/wf-tui-2)
 
 ## Wave 2 — workflow.ts follow-ups (sequential after Wave 1 #1-3)
 - [ ] 5. workflow.ts: **dynamic planning** — a `goal` string param that a planner
