@@ -8,13 +8,14 @@ package typecheck before it is pushed. Never land broken code.**
 Progress markers: [ ] todo · [~] in progress · [x] done · [!] blocked/skipped
 
 ## Wave 1 — disjoint files, run in parallel
-- [ ] 1. workflow.ts: per-step **retry** on transient errors (503 "Loading model",
+- [x] 1. workflow.ts: per-step **retry** on transient errors (503 "Loading model",
       5xx, isRetryable, ECONNRESET) with backoff. Param `retries` (default 2, 0..5).
-- [ ] 2. workflow.ts: per-step **timeout** (`step_timeout_seconds`, 0=off) →
-      cancel child, mark step error. (bundled with #1, same file/agent)
-- [ ] 3. workflow.ts: **small-model-friendly validation errors** via
+      (improve/wf-robustness-2)
+- [x] 2. workflow.ts: per-step **timeout** (`step_timeout_seconds`, 0=off) →
+      cancel child, mark step error. (improve/wf-robustness-2)
+- [x] 3. workflow.ts: **small-model-friendly validation errors** via
       `formatValidationError` so a dumb model self-corrects malformed calls.
-      (bundled with #1)
+      (improve/wf-robustness-2)
 - [x] 4. tui index.tsx: workflow block **duration + counts + failure visibility**;
       completed block keeps a useful clickable summary. (improve/wf-tui-2)
 
