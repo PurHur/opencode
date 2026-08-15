@@ -12,6 +12,16 @@ Pass `steps` as a plain list of strings. Each string is one task. It runs after 
     ]
   })
 
+## Dynamic planning (let the workflow plan itself)
+If you know the goal but not the exact steps, pass `goal` instead of `steps`. A planning subagent expands the goal into 2-16 concrete steps, which are then run as a normal pipeline. The chosen plan is reported in the output.
+
+  workflow({
+    "description": "audit a repo",
+    "goal": "Find and summarize the top security risks in this repository"
+  })
+
+Provide EITHER `goal` (to plan) OR `steps` (to run a known plan). If both are given, `steps` win and `goal` is ignored. Planning fails if the planner cannot produce any steps.
+
 ## Run steps in parallel
 Make a step an array of strings. Those run at the same time, and the next step receives all of their results.
 

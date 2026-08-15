@@ -13,10 +13,18 @@ import type { TaskPromptOps } from "./task"
 
 const id = "workflow"
 const DEFAULT_AGENT = "general"
+// The agent used for the planning phase when a goal is given: the dedicated
+// `planner` agent if the user has one, otherwise the default general agent.
+const PLANNER_AGENT = "planner"
 const MAX_STEPS = 16
 const DEFAULT_CONCURRENCY = 4
 const MAX_CONCURRENCY = 8
 const RESULT_LIMIT = 8000
+// When a result exceeds RESULT_LIMIT we keep both ends: the head carries the
+// setup, the tail carries the conclusion. A slow local backend rules out a
+// summarizer subagent, so this stays cheap and deterministic.
+const RESULT_HEAD = 5000
+const RESULT_TAIL = 2500
 const DEFAULT_RETRIES = 2
 const MAX_RETRIES = 5
 const MAX_STEP_TIMEOUT = 3600
@@ -63,11 +71,17 @@ const StepEntry = Schema.Union([Schema.String, Schema.Array(Schema.String), Step
 
 export const Parameters = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the workflow" }),
-  steps: Schema.mutable(Schema.Array(StepEntry)).annotate({
+  goal: Schema.optional(Schema.String).annotate({
+    description:
+      "A high-level goal to plan into steps automatically. Provide this INSTEAD of steps when you want the " +
+      "workflow to plan itself: a planning subagent expands the goal into concrete steps that are then run. " +
+      "If steps are also given, they win and goal is ignored.",
+  }),
+  steps: Schema.optional(Schema.mutable(Schema.Array(StepEntry))).annotate({
     description:
       "The steps to run in order. Each step is EITHER a plain string (a task that runs after the previous " +
       "step and automatically receives its result), OR an array of strings (tasks that run in parallel), OR an " +
-      `object {prompt, agent?, depends_on?, id?} for an explicit graph. Most workflows are just a list of strings. At most ${MAX_STEPS} steps.`,
+      `object {prompt, agent?, depends_on?, id?} for an explicit graph. Most workflows are just a list of strings. At most ${MAX_STEPS} steps. Omit when providing a goal.`,
   }),
   concurrency: Schema.optional(Schema.Number).annotate({
     description: `Maximum number of steps to run at once (default ${DEFAULT_CONCURRENCY}, max ${MAX_CONCURRENCY})`,
@@ -86,7 +100,7 @@ export const Parameters = Schema.Struct({
 })
 
 type Params = Schema.Schema.Type<typeof Parameters>
-type RawStep = Params["steps"][number]
+type RawStep = Schema.Schema.Type<typeof StepEntry>
 
 // Internal, fully-resolved step used by the scheduler.
 type StepInput = {
@@ -131,11 +145,44 @@ type Metadata = {
   description: string
   steps: Record<string, StepState>
   sessions: Record<string, string>
+  plan?: string[]
+}
+
+// The instruction handed to the planning subagent. The literal prefix
+// "Break this goal into" is also how a caller (or a test) recognises the
+// planning turn among the step turns.
+export function plannerPrompt(goal: string) {
+  return (
+    `Break this goal into 2 to ${MAX_STEPS} concrete, independent workflow steps. ` +
+    `Reply with ONLY a JSON array of short step instruction strings, nothing else. Goal: ${goal}`
+  )
+}
+
+// Parse the planner's final text into a list of step instructions. Lenient: the
+// model may wrap the array in prose or a markdown code fence, so we take the
+// span from the first "[" to the last "]" and JSON-parse that. Returns an empty
+// array when nothing usable is found.
+export function parsePlan(text: string): string[] {
+  const start = text.indexOf("[")
+  const end = text.lastIndexOf("]")
+  if (start === -1 || end === -1 || end < start) return []
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1))
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim())
+  } catch {
+    return []
+  }
 }
 
 function truncate(text: string) {
   if (text.length <= RESULT_LIMIT) return text
-  return text.slice(0, RESULT_LIMIT) + `\n… [truncated ${text.length - RESULT_LIMIT} characters]`
+  const removed = text.length - RESULT_HEAD - RESULT_TAIL
+  return (
+    text.slice(0, RESULT_HEAD) + `\n… [truncated ${removed} characters] …\n` + text.slice(text.length - RESULT_TAIL)
+  )
 }
 
 function escape(text: string) {
@@ -192,9 +239,13 @@ function renderOutput(input: {
   steps: StepInput[]
   states: Record<string, StepState>
   results: Record<string, string>
+  plan?: string[]
 }) {
   return [
     `<workflow description="${escape(input.description)}">`,
+    ...(input.plan && input.plan.length > 0
+      ? ["<plan>", ...input.plan.map((step, index) => `${index + 1}. ${escape(step)}`), "</plan>"]
+      : []),
     ...input.steps.flatMap((step) => [
       `<step id="${escape(step.id)}" agent="${escape(step.agent ?? DEFAULT_AGENT)}" state="${input.states[step.id]}">`,
       truncate(input.results[step.id] ?? ""),
@@ -215,10 +266,8 @@ export const WorkflowTool = Tool.define(
     const run = Effect.fn("WorkflowTool.execute")(function* (params: Params, ctx: Tool.Context) {
       const cfg = yield* config.get()
 
-      const steps = normalizeSteps(params.steps)
-      const invalid = validate(steps)
-      if (invalid) return yield* Effect.fail(new Error(`Invalid workflow: ${invalid}`))
-
+      // Depth guard first: it must apply to the planning subagent too, and it
+      // must reject before anything (planner included) is spawned or asked.
       const parent = yield* sessions.get(ctx.sessionID)
       let current = parent
       let depth = 0
@@ -233,6 +282,96 @@ export const WorkflowTool = Tool.define(
           ),
         )
       }
+
+      const ops = ctx.extra?.promptOps as TaskPromptOps
+      if (!ops) return yield* Effect.fail(new Error("WorkflowTool requires promptOps in ctx.extra"))
+
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
+      )
+      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const variant = msg.info.variant
+      const inherited = { modelID: msg.info.modelID, providerID: msg.info.providerID }
+
+      // Compute the child-session permission set for a given subagent: inherited
+      // permissions plus denies for nested workflow/task so a step (or the
+      // planner) cannot recurse. Shared by the planner and every step.
+      const childPermissionsFor = (next: Agent.Info) => {
+        const childPermission = deriveSubagentSessionPermission({
+          parentSessionPermission: parent.permission ?? [],
+          subagent: next,
+        })
+        const childToolDenies = [
+          ...(next.permission.some((rule) => rule.permission === id)
+            ? []
+            : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+          ...(cfg.experimental?.primary_tools?.map((permission) => ({
+            permission,
+            pattern: "*" as const,
+            action: "deny" as const,
+          })) ?? []),
+        ]
+        return [
+          ...childPermission,
+          ...childToolDenies.filter(
+            (deny) =>
+              !childPermission.some(
+                (rule) =>
+                  rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+              ),
+          ),
+        ]
+      }
+
+      // PLANNING PHASE: a goal with no explicit steps is expanded by a planning
+      // subagent into concrete step instructions. Explicit steps always win, so
+      // goal is ignored whenever steps are provided.
+      let rawSteps: RawStep[] = params.steps ? [...params.steps] : []
+      const goal = params.goal?.trim()
+      let plan: string[] | undefined
+      if (goal && rawSteps.length === 0) {
+        const plannerAgent = (yield* agents.get(PLANNER_AGENT)) ?? (yield* agents.get(DEFAULT_AGENT))
+        if (!plannerAgent)
+          return yield* Effect.fail(new Error(`Unknown agent type: ${DEFAULT_AGENT} is not a valid agent type`))
+
+        // The planning child is subagent work, so it goes through the same ask.
+        if (!ctx.extra?.bypassAgentCheck) {
+          yield* ctx.ask({
+            permission: id,
+            patterns: [plannerAgent.name],
+            always: ["*"],
+            metadata: { description: params.description, steps: ["plan"] },
+          })
+        }
+
+        const plannerChild = yield* sessions.create({
+          parentID: ctx.sessionID,
+          title: `${params.description}: plan (@${plannerAgent.name} subagent)`,
+          agent: plannerAgent.name,
+          permission: childPermissionsFor(plannerAgent),
+        })
+        const plannerParts = yield* ops.resolvePromptParts(plannerPrompt(goal))
+        const plannerResult = yield* ops
+          .prompt({
+            messageID: MessageID.ascending(),
+            sessionID: plannerChild.id,
+            model: plannerAgent.model ?? inherited,
+            variant: plannerAgent.model ? undefined : variant,
+            agent: plannerAgent.name,
+            parts: plannerParts,
+          })
+          .pipe(Effect.onInterrupt(() => ops.cancel(plannerChild.id)))
+
+        const plannerText = plannerResult.parts.findLast((item) => item.type === "text")?.text ?? ""
+        plan = parsePlan(plannerText)
+        if (plan.length === 0) return yield* Effect.fail(new Error("planner did not return any steps"))
+        rawSteps = plan
+      }
+
+      const steps = normalizeSteps(rawSteps)
+      const invalid = validate(steps)
+      if (invalid) return yield* Effect.fail(new Error(`Invalid workflow: ${invalid}`))
 
       const resolved = new Map<string, Agent.Info>()
       for (const name of new Set(steps.map((step) => step.agent ?? DEFAULT_AGENT))) {
@@ -253,17 +392,6 @@ export const WorkflowTool = Tool.define(
         })
       }
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
-        Effect.provideService(Database.Service, database),
-        Effect.orDie,
-      )
-      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-      const variant = msg.info.variant
-      const inherited = { modelID: msg.info.modelID, providerID: msg.info.providerID }
-
-      const ops = ctx.extra?.promptOps as TaskPromptOps
-      if (!ops) return yield* Effect.fail(new Error("WorkflowTool requires promptOps in ctx.extra"))
-
       const retries = Math.max(0, Math.min(Math.floor(params.retries ?? DEFAULT_RETRIES), MAX_RETRIES))
       const stepTimeout = Math.max(0, Math.min(Math.floor(params.step_timeout_seconds ?? 0), MAX_STEP_TIMEOUT))
 
@@ -280,6 +408,7 @@ export const WorkflowTool = Tool.define(
             description: params.description,
             steps: { ...states },
             sessions: { ...childSessions },
+            ...(plan ? { plan } : {}),
           } satisfies Metadata,
         })
 
@@ -291,30 +420,7 @@ export const WorkflowTool = Tool.define(
 
       const runStep = Effect.fn("WorkflowTool.runStep")(function* (step: StepInput) {
         const next = resolved.get(step.agent ?? DEFAULT_AGENT)!
-        const childPermission = deriveSubagentSessionPermission({
-          parentSessionPermission: parent.permission ?? [],
-          subagent: next,
-        })
-        const childToolDenies = [
-          ...(next.permission.some((rule) => rule.permission === id)
-            ? []
-            : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
-          ...(cfg.experimental?.primary_tools?.map((permission) => ({
-            permission,
-            pattern: "*" as const,
-            action: "deny" as const,
-          })) ?? []),
-        ]
-        const childPermissions = [
-          ...childPermission,
-          ...childToolDenies.filter(
-            (deny) =>
-              !childPermission.some(
-                (rule) =>
-                  rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
-              ),
-          ),
-        ]
+        const childPermissions = childPermissionsFor(next)
 
         // The prompt (dependency interpolation and auto-injected context) is the
         // same across attempts, so build it once before any retry.
@@ -370,14 +476,14 @@ export const WorkflowTool = Tool.define(
               ),
             )
 
-          const result = yield* (stepTimeout > 0
+          const result = yield* stepTimeout > 0
             ? turn.pipe(
                 Effect.timeoutOrElse({
                   duration: Duration.seconds(stepTimeout),
                   orElse: () => Effect.fail(new Error(`step timed out after ${stepTimeout}s`)),
                 }),
               )
-            : turn)
+            : turn
 
           if (result.info.role === "assistant" && result.info.error) {
             const err = result.info.error
@@ -470,8 +576,9 @@ export const WorkflowTool = Tool.define(
           description: params.description,
           steps: { ...states },
           sessions: { ...childSessions },
+          ...(plan ? { plan } : {}),
         } satisfies Metadata,
-        output: renderOutput({ description: params.description, steps, states, results }),
+        output: renderOutput({ description: params.description, steps, states, results, plan }),
       }
     })
 
