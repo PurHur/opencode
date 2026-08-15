@@ -20,10 +20,12 @@ Progress markers: [ ] todo · [~] in progress · [x] done · [!] blocked/skipped
       completed block keeps a useful clickable summary. (improve/wf-tui-2)
 
 ## Wave 2 — workflow.ts follow-ups (sequential after Wave 1 #1-3)
-- [ ] 5. workflow.ts: **dynamic planning** — a `goal` string param that a planner
+- [x] 5. workflow.ts: **dynamic planning** — a `goal` string param that a planner
       subagent expands into steps before execution (truly "dynamic" workflows).
-- [ ] 6. workflow.ts: **auto-summarize** oversized child results before injecting
-      into downstream prompts (helps small context windows).
+      (improve/wf-planning)
+- [x] 6. workflow.ts: head+tail truncation of oversized child results before
+      injecting downstream (deterministic, cheap — no summarizer subagent).
+      (improve/wf-planning)
 
 ## Wave 3 — separate subsystems, parallel
 - [ ] 7. session/prompt.ts (or registry): **tool-call repair** — when a small model
