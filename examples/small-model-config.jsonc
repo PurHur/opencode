@@ -1,0 +1,103 @@
+// Example opencode-fork config for a small / local model served over an
+// OpenAI-compatible endpoint (e.g. a quantized 20-30B running under llama.cpp).
+//
+// Copy the relevant parts into your real config and drop the comments — opencode
+// reads plain JSON. Config file locations (first found wins):
+//   - ./opencode.json (or ./opencode.jsonc) in your project
+//   - ./.opencode/opencode.json
+//   - ~/.config/opencode/opencode.json (global)
+//
+// Every top-level key below is a real config key; see docs/small-model-guide.md
+// for the source-of-truth line references. Parameters that are NOT config keys
+// (workflow concurrency / retries / step_timeout_seconds) are documented in that
+// guide as tool-call-time arguments, not here.
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Primary model the agent drives with. Format is "<provider>/<model>", where
+  // "llama.cpp" matches the provider key defined below and "<MODEL>" matches a
+  // key under provider.llama.cpp.models.
+  "model": "llama.cpp/<MODEL>",
+
+  // The "small" model used for cheap side tasks (title/summary generation, etc).
+  // On a single local endpoint you usually point it at the SAME model so there is
+  // only one thing to serve — you are not saving money by splitting, and a second
+  // model would just compete for the one llama.cpp slot.
+  "small_model": "llama.cpp/<MODEL>",
+
+  // Allow subagents to launch their own subagents. The default is 1, which lets a
+  // primary agent spawn subagents but blocks those subagents from spawning more —
+  // and a `workflow` call started from inside a subagent counts as nesting. Set
+  // this to 2 so a subagent can itself run a workflow / task (needed if you want
+  // an agent you delegated to, to in turn fan work out). Raise further only if you
+  // actually nest deeper; each level multiplies concurrent load on your one
+  // backend, which a small local server tolerates poorly.
+  "subagent_depth": 2,
+
+  // Custom provider pointing at your local OpenAI-compatible server.
+  "provider": {
+    // This key ("llama.cpp") is what you reference in "model" above. Any string
+    // works; keep it short.
+    "llama.cpp": {
+      // Use the generic OpenAI-compatible AI SDK adapter. opencode installs this
+      // npm package on demand.
+      "npm": "@ai-sdk/openai-compatible",
+
+      // Display name shown in the model picker / UI.
+      "name": "llama.cpp (local)",
+
+      "options": {
+        // Your llama.cpp server's OpenAI endpoint. Adjust host/port to match how
+        // you launched llama-server (its default is 8080; this example uses 8081).
+        "baseURL": "http://127.0.0.1:8081/v1",
+
+        // llama.cpp ignores the key, but the OpenAI client requires a non-empty
+        // string, so any placeholder works.
+        "apiKey": "local"
+      },
+
+      // Per-model capabilities and limits. The map key ("<MODEL>") must match the
+      // "<MODEL>" you used in "model" / "small_model" above. It does NOT have to
+      // be the model's real filename — it is just the id opencode uses.
+      "models": {
+        "<MODEL>": {
+          // Human-readable label.
+          "name": "My local 30B (Q4)",
+
+          // The model emits a reasoning / thinking channel. Turn this on only if
+          // your model actually produces one; a model that does not will just
+          // waste tokens or confuse parsing.
+          "reasoning": true,
+
+          // The model can do OpenAI-style tool calls. This MUST be a genuinely
+          // tool-call-capable model for workflows and subagents to work. See the
+          // guide: heavily-abliterated / uncensored fine-tunes often claim tool
+          // support but derail on nested JSON schemas — prefer the workflow
+          // string-list form with those.
+          "tool_call": true,
+
+          // Whether the model honors a temperature parameter.
+          "temperature": true,
+
+          "limit": {
+            // Total context window (tokens). Match what you launched llama.cpp
+            // with (-c / --ctx-size). Setting this larger than the server's real
+            // window causes truncation errors mid-run.
+            "context": 262144,
+
+            // Max tokens the model may generate per response. Keep generous so
+            // subagents can finish a step, but not so large that a single step
+            // monopolizes the slot for minutes.
+            "output": 32768
+          },
+
+          // How the OpenAI-compatible stream delivers reasoning tokens. Many
+          // llama.cpp / vLLM builds put them in a separate "reasoning_content"
+          // field rather than inline. If your reasoning shows up as normal
+          // content instead, remove this block or set the correct field name.
+          "interleaved": { "field": "reasoning_content" }
+        }
+      }
+    }
+  }
+}
