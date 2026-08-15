@@ -13,6 +13,8 @@ import {
   parseQuestionAnswers,
   parseQuestions,
   parseTodos,
+  parseWorkflowSteps,
+  workflowGlyph,
   alwaysSeparate,
   toolDisplay,
 } from "../../../src/routes/session"
@@ -289,6 +291,46 @@ describe("TUI inline tool wrapping", () => {
 
   test("keeps retry status ahead of wrapping messages", () => {
     expect(formatSubagentRetry(2, "Rate limited by provider")).toBe("Retrying (attempt 2) · Rate limited by provider")
+  })
+
+  test("registers the workflow tool for a dedicated renderer", () => {
+    expect(toolDisplay("workflow")).toBe("workflow")
+  })
+
+  test("maps workflow step states to status glyphs", () => {
+    expect(workflowGlyph("done")).toBe("✓")
+    expect(workflowGlyph("error")).toBe("✗")
+    expect(workflowGlyph("running")).toBe("•")
+    expect(workflowGlyph("skipped")).toBe("–")
+    expect(workflowGlyph("pending")).toBe("○")
+  })
+
+  test("merges declared workflow steps with live states and sessions", () => {
+    const steps = parseWorkflowSteps(
+      [
+        { id: "a", prompt: "x" },
+        { id: "b", agent: "reviewer", prompt: "y", depends_on: ["a"] },
+        { id: "c", prompt: "z", depends_on: ["a", "b"] },
+      ],
+      { a: "done", b: "running", c: "pending" },
+      { a: "ses_a", b: "ses_b" },
+    )
+    expect(steps).toEqual([
+      { id: "a", agent: undefined, state: "done", sessionID: "ses_a" },
+      { id: "b", agent: "reviewer", state: "running", sessionID: "ses_b" },
+      { id: "c", agent: undefined, state: "pending", sessionID: undefined },
+    ])
+  })
+
+  test("preserves declared order and defaults unknown/missing step states to pending", () => {
+    const steps = parseWorkflowSteps([{ id: "a", prompt: "x" }, { id: "b", prompt: "y" }], { a: "bogus" }, {})
+    expect(steps.map((step) => step.id)).toEqual(["a", "b"])
+    expect(steps.every((step) => step.state === "pending")).toBe(true)
+  })
+
+  test("falls back to metadata step ids when the input is unavailable", () => {
+    const steps = parseWorkflowSteps(undefined, { only: "error" }, { only: "ses_only" })
+    expect(steps).toEqual([{ id: "only", agent: undefined, state: "error", sessionID: "ses_only" }])
   })
 
   test("snapshots consecutive grep, glob, and read rows at a narrow width", async () => {

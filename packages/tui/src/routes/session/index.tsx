@@ -1773,6 +1773,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={display() === "task"}>
           <Task {...toolprops} />
         </Match>
+        <Match when={display() === "workflow"}>
+          <Workflow {...toolprops} />
+        </Match>
         <Match when={display() === "execute"}>
           <Execute {...toolprops} />
         </Match>
@@ -2340,6 +2343,134 @@ export function formatCompletedSubagentDetail(toolcalls: number, duration: strin
   return `${formatSubagentToolcalls(toolcalls)} · ${duration}`
 }
 
+type WorkflowStepState = "pending" | "running" | "done" | "error" | "skipped"
+type WorkflowStepInfo = { id: string; agent?: string; state: WorkflowStepState; sessionID?: string }
+
+function workflowStepState(value: unknown): WorkflowStepState {
+  const state = stringValue(value)
+  return state === "running" || state === "done" || state === "error" || state === "skipped" ? state : "pending"
+}
+
+// Merge the declared steps (from input) with the live states/sessions streamed through metadata.
+export function parseWorkflowSteps(input: unknown, states: unknown, sessions: unknown): WorkflowStepInfo[] {
+  const stateMap = recordValue(states) ?? {}
+  const sessionMap = recordValue(sessions) ?? {}
+  const declared = Array.isArray(input)
+    ? input.flatMap((item) => {
+        const step = recordValue(item)
+        const id = stringValue(step?.id)
+        return id ? [{ id, agent: stringValue(step?.agent) }] : []
+      })
+    : []
+  const ids = declared.length ? declared.map((step) => step.id) : Object.keys(stateMap)
+  const agentByID = new Map(declared.map((step) => [step.id, step.agent]))
+  return ids.map((id) => ({
+    id,
+    agent: agentByID.get(id),
+    state: workflowStepState(stateMap[id]),
+    sessionID: stringValue(sessionMap[id]),
+  }))
+}
+
+export function workflowGlyph(state: WorkflowStepState) {
+  if (state === "done") return "✓"
+  if (state === "error") return "✗"
+  if (state === "running") return "•"
+  if (state === "skipped") return "–"
+  return "○"
+}
+
+// One row per workflow step, echoing the running subagent's current activity live (mirrors Task).
+function WorkflowStep(props: { step: WorkflowStepInfo }) {
+  const { theme } = useTheme()
+  const sync = useSync()
+
+  onMount(() => {
+    const sessionID = props.step.sessionID
+    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
+  })
+
+  const color = createMemo(() => {
+    if (props.step.state === "done") return theme.success
+    if (props.step.state === "error") return theme.error
+    if (props.step.state === "running") return theme.warning
+    return theme.textMuted
+  })
+
+  const activity = createMemo(() => {
+    if (props.step.state !== "running") return undefined
+    const sessionID = props.step.sessionID
+    if (!sessionID) return undefined
+    const tools = (sync.data.message[sessionID] ?? []).flatMap((msg) =>
+      (sync.data.part[msg.id] ?? []).filter((part): part is ToolPart => part.type === "tool"),
+    )
+    const current = tools.findLast(
+      (part) => (part.state.status === "running" || part.state.status === "completed") && part.state.title,
+    )
+    if (!current) return undefined
+    const title = current.state.status === "running" || current.state.status === "completed" ? current.state.title : undefined
+    return `${Locale.titlecase(current.tool)}${title ? ` ${title}` : ""}`
+  })
+
+  const label = createMemo(() => {
+    const agent = props.step.agent && props.step.agent !== "general" ? ` @${props.step.agent}` : ""
+    return `${props.step.id}${agent}`
+  })
+
+  return (
+    <box flexDirection="row" gap={0}>
+      <text flexShrink={0} fg={color()}>
+        [{workflowGlyph(props.step.state)}]{" "}
+      </text>
+      <text flexGrow={1} wrapMode="word" fg={color()}>
+        {label()}
+        <Show when={activity()}>
+          <span style={{ fg: theme.textMuted }}>{`  ↳ ${activity()}`}</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
+export function Workflow(props: ToolProps) {
+  const { theme } = useTheme()
+  const isRunning = createMemo(
+    () => props.part.state.status === "pending" || props.part.state.status === "running",
+  )
+  const description = createMemo(
+    () => stringValue(props.metadata.description) ?? stringValue(props.input.description) ?? "workflow",
+  )
+  const steps = createMemo(() => parseWorkflowSteps(props.input.steps, props.metadata.steps, props.metadata.sessions))
+  const summary = createMemo(() => {
+    const all = steps()
+    const done = all.filter((step) => step.state === "done").length
+    const failed = all.filter((step) => step.state === "error").length
+    const skipped = all.filter((step) => step.state === "skipped").length
+    const detail = [`${done}/${all.length} done`]
+    if (failed) detail.push(`${failed} failed`)
+    if (skipped) detail.push(`${skipped} skipped`)
+    return detail.join(" · ")
+  })
+
+  return (
+    <Switch>
+      <Match when={steps().length}>
+        <BlockTool title={`# Workflow — ${description()}`} part={props.part} spinner={isRunning()}>
+          <box gap={0}>
+            <For each={steps()}>{(step) => <WorkflowStep step={step} />}</For>
+          </box>
+          <text fg={theme.textMuted}>{summary()}</text>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
+        <InlineTool icon="⚙" pending="Planning workflow..." complete={false} spinner={isRunning()} part={props.part}>
+          Planning workflow...
+        </InlineTool>
+      </Match>
+    </Switch>
+  )
+}
+
 type ExecuteCall = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
 
 function executeCalls(value: unknown): ExecuteCall[] {
@@ -2652,6 +2783,7 @@ const toolDisplays = new Set([
   "write",
   "edit",
   "task",
+  "workflow",
   "apply_patch",
   "todowrite",
   "question",
