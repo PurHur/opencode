@@ -13,6 +13,7 @@ import { SyncProvider } from "../../../src/context/sync"
 import { PermissionProvider } from "../../../src/context/permission"
 import { ExitProvider } from "../../../src/context/exit"
 import { ThemeProvider } from "../../../src/context/theme"
+import { RouteProvider } from "../../../src/context/route"
 import { TuiConfigProvider } from "../../../src/config"
 import { Workflow } from "../../../src/routes/session"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
@@ -80,9 +81,11 @@ describe("TUI workflow renderer", () => {
                     <ProjectProvider>
                       <ExitProvider exit={() => {}}>
                         <SyncProvider>
-                          <ThemeProvider mode="dark">
-                            <Workflow input={input} metadata={metadata} tool="workflow" part={part as any} />
-                          </ThemeProvider>
+                          <RouteProvider>
+                            <ThemeProvider mode="dark">
+                              <Workflow input={input} metadata={metadata} tool="workflow" part={part as any} />
+                            </ThemeProvider>
+                          </RouteProvider>
                         </SyncProvider>
                       </ExitProvider>
                     </ProjectProvider>

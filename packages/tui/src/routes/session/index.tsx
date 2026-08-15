@@ -2383,17 +2383,24 @@ export function workflowGlyph(state: WorkflowStepState) {
   return "○"
 }
 
-// One row per workflow step, echoing the running subagent's current activity live (mirrors Task).
+// One row per workflow step, echoing the running subagent's current activity live
+// (mirrors Task). Clicking a step opens its subagent session to watch live output.
 function WorkflowStep(props: { step: WorkflowStepInfo }) {
   const { theme } = useTheme()
   const sync = useSync()
+  const { navigate } = useRoute()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
 
   onMount(() => {
     const sessionID = props.step.sessionID
     if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
   })
 
+  const clickable = createMemo(() => Boolean(props.step.sessionID))
+
   const color = createMemo(() => {
+    if (hover() && clickable()) return theme.text
     if (props.step.state === "done") return theme.success
     if (props.step.state === "error") return theme.error
     if (props.step.state === "running") return theme.warning
@@ -2421,7 +2428,17 @@ function WorkflowStep(props: { step: WorkflowStepInfo }) {
   })
 
   return (
-    <box flexDirection="row" gap={0}>
+    <box
+      flexDirection="row"
+      gap={0}
+      onMouseOver={() => clickable() && setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        if (renderer.getSelection()?.getSelectedText()) return
+        const sessionID = props.step.sessionID
+        if (sessionID) navigate({ type: "session", sessionID })
+      }}
+    >
       <text flexShrink={0} fg={color()}>
         [{workflowGlyph(props.step.state)}]{" "}
       </text>
@@ -2429,6 +2446,9 @@ function WorkflowStep(props: { step: WorkflowStepInfo }) {
         {label()}
         <Show when={activity()}>
           <span style={{ fg: theme.textMuted }}>{`  ↳ ${activity()}`}</span>
+        </Show>
+        <Show when={hover() && clickable()}>
+          <span style={{ fg: theme.textMuted }}>{"  (click to open)"}</span>
         </Show>
       </text>
     </box>
