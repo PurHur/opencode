@@ -5,6 +5,12 @@ Design for three native features in this fork, implemented in the v1 stack
 
 Branch: `feat/native-orchestration`
 
+> **Status: shipped.** All three tools (`workflow`, `agent_create`, `goal`) and the
+> clickable inline workflow rendering in the TUI are implemented on this branch. This
+> file is the design record; for the user-facing guide, copy-paste examples, and
+> ready-made command templates see [`docs/native-orchestration.md`](../docs/native-orchestration.md)
+> and [`examples/opencode-commands/`](../examples/opencode-commands/).
+
 ## Feature 1 — Dynamic subagents (`agent_create` tool)
 
 Let the model define a new subagent at runtime and immediately spawn it via the
