@@ -61,9 +61,27 @@ const GeneratedAgent = Schema.Struct({
   systemPrompt: Schema.String,
 })
 
+/** Agent names registered at runtime must be kebab-case, e.g. `code-reviewer`. */
+export const NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+
+/**
+ * Input accepted by `register`. Everything except the name is optional: the
+ * service forces `mode: "subagent"` and derives the permission ruleset the same
+ * way config agents get theirs.
+ */
+export type RegisterInput = Partial<Omit<Info, "name" | "mode">> & { name: string }
+
 export interface Interface {
   readonly get: (agent: string) => Effect.Effect<Info>
   readonly list: () => Effect.Effect<Info[]>
+  /**
+   * Define a subagent at runtime. The agent lives in a per-instance overlay,
+   * so it is visible to `get`/`list` (and therefore the task tool) immediately
+   * and is discarded when the process exits.
+   */
+  readonly register: (input: RegisterInput) => Effect.Effect<Info, Error>
+  /** Remove a runtime-registered agent. Returns false when nothing was removed. */
+  readonly unregister: (name: string) => Effect.Effect<boolean>
   readonly defaultInfo: () => Effect.Effect<Info>
   readonly defaultAgent: () => Effect.Effect<string>
   readonly generate: (input: {
@@ -79,7 +97,23 @@ export interface Interface {
   >
 }
 
-type State = Omit<Interface, "generate">
+type State = {
+  readonly get: (agent: string) => Effect.Effect<Info>
+  readonly list: (extra?: readonly Info[]) => Effect.Effect<Info[]>
+  readonly defaultInfo: () => Effect.Effect<Info>
+  readonly defaultAgent: () => Effect.Effect<string>
+  /** Defaults merged with user config — the base every agent's ruleset starts from. */
+  readonly basePermission: PermissionV1.Ruleset
+}
+
+/** Mirrors the config-agent rule: keep Truncate.GLOB readable unless denied on purpose. */
+function allowTruncateGlob(ruleset: Info["permission"]): Info["permission"] {
+  const explicit = ruleset.some(
+    (rule) => rule.permission === "external_directory" && rule.action === "deny" && rule.pattern === Truncate.GLOB,
+  )
+  if (explicit) return ruleset
+  return Permission.merge(ruleset, Permission.fromConfig({ external_directory: { [Truncate.GLOB]: "allow" } }))
+}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -295,28 +329,18 @@ const layer = Layer.effect(
 
         // Ensure Truncate.GLOB is allowed unless explicitly configured
         for (const name in agents) {
-          const agent = agents[name]
-          const explicit = agent.permission.some((r) => {
-            if (r.permission !== "external_directory") return false
-            if (r.action !== "deny") return false
-            return r.pattern === Truncate.GLOB
-          })
-          if (explicit) continue
-
-          agents[name].permission = Permission.merge(
-            agents[name].permission,
-            Permission.fromConfig({ external_directory: { [Truncate.GLOB]: "allow" } }),
-          )
+          agents[name].permission = allowTruncateGlob(agents[name].permission)
         }
 
         const get = Effect.fnUntraced(function* (agent: string) {
           return agents[agent]
         })
 
-        const list = Effect.fnUntraced(function* () {
+        const list = Effect.fnUntraced(function* (extra: readonly Info[] = []) {
           const cfg = yield* config.get()
           return pipe(
-            agents,
+            // config and native agents win over runtime-registered ones
+            { ...Object.fromEntries(extra.map((item) => [item.name, item])), ...agents },
             values(),
             sortBy(
               [(x) => (cfg.default_agent ? x.name === cfg.default_agent : x.name === "build"), "desc"],
@@ -348,16 +372,62 @@ const layer = Layer.effect(
           list,
           defaultInfo,
           defaultAgent,
+          basePermission: Permission.merge(defaults, user),
         } satisfies State
       }),
     )
 
+    // Runtime-registered agents, keyed by instance directory. Deliberately kept
+    // outside `state` so config reloads (which invalidate it) don't drop them.
+    const runtime = new Map<string, Record<string, Info>>()
+    const overlay = Effect.fnUntraced(function* () {
+      const directory = yield* InstanceState.directory
+      let found = runtime.get(directory)
+      if (!found) {
+        found = {}
+        runtime.set(directory, found)
+      }
+      return found
+    })
+
     return Service.of({
       get: Effect.fn("Agent.get")(function* (agent: string) {
-        return yield* InstanceState.useEffect(state, (s) => s.get(agent))
+        const found = yield* InstanceState.useEffect(state, (s) => s.get(agent))
+        if (found) return found
+        return (yield* overlay())[agent]
       }),
       list: Effect.fn("Agent.list")(function* () {
-        return yield* InstanceState.useEffect(state, (s) => s.list())
+        const extra = Object.values(yield* overlay())
+        return yield* InstanceState.useEffect(state, (s) => s.list(extra))
+      }),
+      register: Effect.fn("Agent.register")(function* (input: RegisterInput) {
+        if (!NAME_PATTERN.test(input.name))
+          return yield* Effect.fail(
+            new Error(
+              `Invalid agent name "${input.name}". Use lowercase kebab-case letters, digits and dashes, e.g. "code-reviewer".`,
+            ),
+          )
+        const existing = yield* InstanceState.useEffect(state, (s) => s.get(input.name))
+        const current = yield* overlay()
+        if (existing || input.name in current)
+          return yield* Effect.fail(new Error(`Agent "${input.name}" already exists. Pick a different name.`))
+        const base = yield* InstanceState.use(state, (s) => s.basePermission)
+        const info: Info = {
+          ...input,
+          name: input.name,
+          mode: "subagent",
+          native: false,
+          options: input.options ?? {},
+          permission: allowTruncateGlob(Permission.merge(base, input.permission ?? [])),
+        }
+        current[info.name] = info
+        return info
+      }),
+      unregister: Effect.fn("Agent.unregister")(function* (name: string) {
+        const current = yield* overlay()
+        if (!(name in current)) return false
+        delete current[name]
+        return true
       }),
       defaultInfo: Effect.fn("Agent.defaultInfo")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultInfo())

@@ -1,0 +1,12 @@
+Define a new subagent at runtime, then spawn it with the task tool.
+
+Use this when a piece of work is better handled by a specialist you can reuse several times in this session — for example a reviewer with a fixed checklist, a migration writer, or a research agent with a narrow brief. The agent becomes available to the task tool immediately (as `subagent_type: "<name>"`), for the rest of the session.
+
+Guidance:
+- `name` must be lowercase kebab-case (`code-reviewer`, `test-writer`) and must not collide with an existing agent.
+- `prompt` is the agent's system prompt. Make it specific: what it does, what it must not do, and what it should return.
+- `description` tells you (and future turns) when to pick this agent. Keep it to one sentence.
+- `model` is optional and takes the form `provider/model`; omit it to inherit the caller's model.
+- `persist: true` also writes `.opencode/agent/<name>.md` in the project so the agent survives restarts. Only do this when the user asked for a lasting agent.
+
+Do not create an agent for one-off work that `general` or `explore` already covers — call the task tool with those instead.
