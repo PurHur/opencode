@@ -28,8 +28,9 @@ Progress markers: [ ] todo · [~] in progress · [x] done · [!] blocked/skipped
 ## Wave 3 — separate subsystems, parallel
 - [ ] 7. session/prompt.ts (or registry): **tool-call repair** — when a small model
       emits malformed tool args, retry the step once with a corrective hint.
-- [ ] 8. config: **small-model preset** / documented defaults (lower concurrency,
+- [x] 8. config: **small-model preset** / documented defaults (lower concurrency,
       subagent_depth, sensible reminders) for weak local backends.
+      (improve/small-model-config: examples/small-model-config.jsonc + docs/small-model-guide.md)
 - [ ] 9. **resume/recover** an interrupted workflow: detect an orphaned `pending`
       workflow tool call (turn cut off) and surface/clean it instead of hanging
       forever. (Directly fixes the "Planning workflow…" stuck state.)
