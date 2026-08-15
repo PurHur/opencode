@@ -151,3 +151,9 @@ Tips that matter most on a weak model:
 - Do not restate a previous step's output in the next prompt — the string list
   forwards it automatically.
 - Keep `concurrency` at or below your server's slot count (§2).
+- **Prefer explicit `steps` over the `goal` dynamic-planning form on a small model.**
+  Passing a `goal` (and omitting `steps`) makes a planner subagent expand it into
+  steps, but that asks the model for a clean JSON array up front and fails with
+  `planner did not return any steps` if it cannot produce one. When you already know
+  the plan, write the steps yourself — it is the lower-ceremony call. See
+  [dynamic planning](./native-orchestration.md#form-4--a-goal-dynamic-planning).

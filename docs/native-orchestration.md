@@ -15,8 +15,10 @@ clickable block so you can watch each step.
   - [Form 1 — a plain list of steps (start here)](#form-1--a-plain-list-of-steps-start-here)
   - [Form 2 — a parallel batch](#form-2--a-parallel-batch)
   - [Form 3 — an explicit graph](#form-3--an-explicit-graph)
+  - [Form 4 — a goal (dynamic planning)](#form-4--a-goal-dynamic-planning)
   - [Parameters](#workflow-parameters)
   - [Partial failure](#partial-failure)
+  - [Reliability & dynamic planning](#reliability--dynamic-planning)
 - [The `agent_create` tool](#the-agent_create-tool)
 - [The `goal` tool](#the-goal-tool)
 - [Watching progress](#watching-progress-in-the-tui)
@@ -107,22 +109,51 @@ the plain string list a pipeline). Note the difference from the string form: an
 object step with **no** `depends_on` is an independent root, whereas a plain string
 always chains onto whatever ran immediately before it.
 
+### Form 4 — a goal (dynamic planning)
+
+If you know the goal but not the exact steps, pass **`goal`** instead of `steps` and
+omit `steps` entirely. A planning subagent (the `planner` agent if you have one,
+otherwise `general`) expands the goal into 2–16 concrete steps, which then run as a
+normal pipeline. The chosen plan is reported back in the output (and in the TUI block).
+
+```json
+{
+  "description": "hunt vulns",
+  "goal": "find and report vulnerabilities in the most active smart contracts"
+}
+```
+
+Provide **either** `goal` (to plan) **or** `steps` (to run a known plan). If both are
+given, `steps` win and `goal` is ignored. Planning fails with
+`planner did not return any steps` if the planner cannot produce a usable list, so on
+a weak local model prefer an explicit `steps` list when you already know the plan.
+
 <a id="workflow-parameters"></a>
 ### Parameters
 
 | Param | Required | Notes |
 | --- | --- | --- |
 | `description` | yes | A short (3-5 words) description of the workflow. Also the title shown in the TUI. |
-| `steps` | yes | The ordered list. Each entry is a string, an array of strings, or an object. **Max 16 steps.** |
+| `steps` | yes, unless `goal` | The ordered list. Each entry is a string, an array of strings, or an object. **Max 16 steps.** Omit when providing a `goal`. |
+| `goal` | yes, unless `steps` | A high-level goal to plan into steps automatically (see [Form 4](#form-4--a-goal-dynamic-planning)). Ignored if `steps` is also given. |
 | `concurrency` | no | Maximum steps to run at once. Default `4`, max `8`. |
+| `retries` | no | Times to retry a step that fails with a *transient* error. Default `2`, max `5`, `0` disables. See [Reliability](#reliability--dynamic-planning). |
+| `step_timeout_seconds` | no | Cancel and error a step that runs longer than this. Default `0` (no limit), max `3600`. |
 
 Other behavior worth knowing:
 
-- Step results are truncated to ~8000 characters when injected into a dependent step
-  and in the final output.
+- Long step results are truncated to ~8000 characters when injected into a dependent
+  step and in the final output. Truncation keeps **both ends** — the first ~5000 and
+  the last ~2500 characters — with a `… [truncated N characters] …` marker between
+  them, so a step keeps its setup and its conclusion rather than being cut off flat.
 - Workflows cannot be started from inside a subagent past the configured
   `subagent_depth` (default 1). Raise `subagent_depth` in config to allow nesting.
+  The depth guard is checked before any subagent (planner included) is spawned.
 - The first `workflow` call in a session asks for permission (per agent type used).
+- Invalid input is rejected before any subagent runs, with plain-language messages
+  aimed at small models — e.g. an empty list, more than 16 steps, a duplicate id, a
+  `depends_on` that names an unknown step, or a dependency cycle each report exactly
+  what to change.
 
 ### Partial failure
 
@@ -130,6 +161,50 @@ If a step fails, its dependents are **skipped**, but every other result is still
 returned. Each step reports its own state in the output — `done`, `error`, or
 `skipped` — so the calling model can synthesize from whatever succeeded rather than
 losing the whole run. Always check the per-step states before trusting the summary.
+
+### Reliability & dynamic planning
+
+Two per-call arguments make a workflow survive a flaky or slow backend, and one lets
+the workflow plan itself. All three are especially useful with a small / local model
+(see the [small-model guide](./small-model-guide.md)).
+
+**`retries`** (default `2`, max `5`, `0` disables) — when a step fails with a
+*transient* error, it is retried with exponential backoff (2s, 4s, 8s, …). A failure
+counts as transient when the model's error is a retryable API error (HTTP status
+≥ 500, or explicitly flagged retryable) **or** its message matches `loading model`,
+`503`, `overloaded`, `ECONNRESET`, `reset`, or `timeout` — exactly the flakiness a
+cold local server produces. Non-transient errors always fail the step immediately,
+without retrying. Values are clamped to the `0`–`5` range.
+
+**`step_timeout_seconds`** (default `0` = no limit, max `3600`) — if a single step
+runs longer than this, it is cancelled and marked a `timeout` error (`step timed out
+after Ns`), and its dependents are skipped like any other step failure. Use it so one
+wedged step cannot hang the whole run; on a slow local model do not set it too tight.
+A timeout is not treated as transient, so it does not consume a retry.
+
+```json
+{
+  "description": "audit with guardrails",
+  "steps": [
+    "Scan the auth code for vulnerabilities; list file:line and severity",
+    "Write a prioritized report of the findings"
+  ],
+  "concurrency": 2,
+  "retries": 3,
+  "step_timeout_seconds": 300
+}
+```
+
+**`goal`** (dynamic planning) — provide a `goal` and omit `steps`, and a planner
+subagent expands it into concrete steps that are then run (see
+[Form 4](#form-4--a-goal-dynamic-planning)):
+
+```json
+{
+  "description": "hunt vulns",
+  "goal": "find and report vulnerabilities in the most active smart contracts"
+}
+```
 
 ## The `agent_create` tool
 
