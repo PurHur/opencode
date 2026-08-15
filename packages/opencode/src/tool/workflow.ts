@@ -6,7 +6,7 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { Config } from "@/config/config"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Duration, Effect, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import type { TaskPromptOps } from "./task"
@@ -17,6 +17,28 @@ const MAX_STEPS = 16
 const DEFAULT_CONCURRENCY = 4
 const MAX_CONCURRENCY = 8
 const RESULT_LIMIT = 8000
+const DEFAULT_RETRIES = 2
+const MAX_RETRIES = 5
+const MAX_STEP_TIMEOUT = 3600
+
+// Errors from a child turn that are worth retrying: the assistant message error
+// is a retryable API error (>=500 or explicitly retryable), or its text looks
+// like a transient loading/overload/network condition a slow local model hits.
+const TRANSIENT_MESSAGE = /loading model|503|overloaded|ECONNRESET|reset|timeout/i
+
+// A retryable step failure. Kept as a distinct Error subclass so the retry loop
+// can tell it apart from a permanent failure (which fails the step immediately).
+class TransientStepError extends Error {}
+
+function isTransientError(err: { name: string; data: Record<string, unknown> }) {
+  const data = err.data ?? {}
+  if (err.name === "APIError") {
+    if (typeof data.statusCode === "number" && data.statusCode >= 500) return true
+    if (data.isRetryable === true) return true
+  }
+  const message = typeof data.message === "string" ? data.message : err.name
+  return TRANSIENT_MESSAGE.test(message)
+}
 
 export type StepState = "pending" | "running" | "done" | "error" | "skipped"
 
@@ -49,6 +71,17 @@ export const Parameters = Schema.Struct({
   }),
   concurrency: Schema.optional(Schema.Number).annotate({
     description: `Maximum number of steps to run at once (default ${DEFAULT_CONCURRENCY}, max ${MAX_CONCURRENCY})`,
+  }),
+  retries: Schema.optional(Schema.Number).annotate({
+    description:
+      `How many times to retry a step that fails with a transient error such as "loading model", 503, ` +
+      `overloaded, connection reset, or timeout (default ${DEFAULT_RETRIES}, max ${MAX_RETRIES}, 0 disables). ` +
+      "Non-transient errors always fail immediately.",
+  }),
+  step_timeout_seconds: Schema.optional(Schema.Number).annotate({
+    description:
+      `Cancel a single step and mark it a timeout error if it runs longer than this many seconds ` +
+      `(default 0 = no limit, max ${MAX_STEP_TIMEOUT}).`,
   }),
 })
 
@@ -133,22 +166,24 @@ export function layers(steps: StepInput[]) {
 }
 
 function validate(steps: StepInput[]) {
-  if (steps.length === 0) return "steps must not be empty"
-  if (steps.length > MAX_STEPS) return `too many steps (${steps.length}), the maximum is ${MAX_STEPS}`
+  if (steps.length === 0) return 'steps must not be empty; provide at least one step, e.g. "steps": ["do the task"]'
+  if (steps.length > MAX_STEPS)
+    return `too many steps (${steps.length}); use at most ${MAX_STEPS} by combining related work into fewer steps`
   const ids = new Set<string>()
   for (const step of steps) {
-    if (!step.id.trim()) return "every step needs a non-empty id"
-    if (!step.prompt.trim()) return `step "${step.id}" needs a non-empty prompt`
-    if (ids.has(step.id)) return `duplicate step id "${step.id}"`
+    if (!step.id.trim()) return "every step needs a non-empty id; omit id to have one generated automatically"
+    if (!step.prompt.trim()) return `step "${step.id}" needs a non-empty prompt describing what the subagent should do`
+    if (ids.has(step.id)) return `duplicate step id "${step.id}"; give each step a unique id`
     ids.add(step.id)
   }
   for (const step of steps) {
     for (const dep of step.depends_on) {
-      if (dep === step.id) return `step "${step.id}" depends on itself`
-      if (!ids.has(dep)) return `step "${step.id}" depends on unknown step "${dep}"`
+      if (dep === step.id) return `step "${step.id}" depends on itself; remove "${step.id}" from its depends_on`
+      if (!ids.has(dep))
+        return `step "${step.id}" depends on unknown step "${dep}"; depends_on must reference an existing step id`
     }
   }
-  if (!layers(steps)) return "steps contain a dependency cycle"
+  if (!layers(steps)) return "steps contain a dependency cycle; make sure depends_on forms a graph with no loops"
   return undefined
 }
 
@@ -229,6 +264,9 @@ export const WorkflowTool = Tool.define(
       const ops = ctx.extra?.promptOps as TaskPromptOps
       if (!ops) return yield* Effect.fail(new Error("WorkflowTool requires promptOps in ctx.extra"))
 
+      const retries = Math.max(0, Math.min(Math.floor(params.retries ?? DEFAULT_RETRIES), MAX_RETRIES))
+      const stepTimeout = Math.max(0, Math.min(Math.floor(params.step_timeout_seconds ?? 0), MAX_STEP_TIMEOUT))
+
       const order = layers(steps)!
       const states: Record<string, StepState> = Object.fromEntries(steps.map((step) => [step.id, "pending"]))
       const results: Record<string, string> = {}
@@ -267,27 +305,19 @@ export const WorkflowTool = Tool.define(
             action: "deny" as const,
           })) ?? []),
         ]
-        const child = yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: `${params.description}: ${step.id} (@${next.name} subagent)`,
-          agent: next.name,
-          permission: [
-            ...childPermission,
-            ...childToolDenies.filter(
-              (deny) =>
-                !childPermission.some(
-                  (rule) =>
-                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
-                ),
-            ),
-          ],
-        })
+        const childPermissions = [
+          ...childPermission,
+          ...childToolDenies.filter(
+            (deny) =>
+              !childPermission.some(
+                (rule) =>
+                  rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+              ),
+          ),
+        ]
 
-        childSessions[step.id] = child.id
-        states[step.id] = "running"
-        running.add(child.id)
-        yield* report()
-
+        // The prompt (dependency interpolation and auto-injected context) is the
+        // same across attempts, so build it once before any retry.
         let prompt = step.prompt
         for (const dep of step.depends_on) {
           prompt = prompt.split(`{{${dep}}}`).join(truncate(results[dep] ?? ""))
@@ -302,33 +332,77 @@ export const WorkflowTool = Tool.define(
             .join("\n")
           if (context) prompt = `Results from previous steps:\n${context}\n\nYour task:\n${prompt}`
         }
-
         const parts = yield* ops.resolvePromptParts(prompt)
-        const result = yield* ops
-          .prompt({
-            messageID: MessageID.ascending(),
-            sessionID: child.id,
-            model: next.model ?? inherited,
-            variant: next.model ? undefined : variant,
+
+        // A single attempt: fresh subagent session, run the turn (optionally under
+        // a timeout), then classify the outcome. Transient failures raise a
+        // TransientStepError so the retry loop can catch them.
+        const attempt = Effect.fn("WorkflowTool.attempt")(function* () {
+          const child = yield* sessions.create({
+            parentID: ctx.sessionID,
+            title: `${params.description}: ${step.id} (@${next.name} subagent)`,
             agent: next.name,
-            parts,
+            permission: childPermissions,
           })
-          .pipe(
-            Effect.onInterrupt(() => ops.cancel(child.id)),
-            Effect.ensuring(
-              Effect.sync(() => {
-                running.delete(child.id)
-              }),
+
+          childSessions[step.id] = child.id
+          states[step.id] = "running"
+          running.add(child.id)
+          yield* report()
+
+          const turn = ops
+            .prompt({
+              messageID: MessageID.ascending(),
+              sessionID: child.id,
+              model: next.model ?? inherited,
+              variant: next.model ? undefined : variant,
+              agent: next.name,
+              parts,
+            })
+            .pipe(
+              // Cancel the child on interrupt — from the outer abort signal as well
+              // as from the per-step timeout, which interrupts this turn.
+              Effect.onInterrupt(() => ops.cancel(child.id)),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  running.delete(child.id)
+                }),
+              ),
+            )
+
+          const result = yield* (stepTimeout > 0
+            ? turn.pipe(
+                Effect.timeoutOrElse({
+                  duration: Duration.seconds(stepTimeout),
+                  orElse: () => Effect.fail(new Error(`step timed out after ${stepTimeout}s`)),
+                }),
+              )
+            : turn)
+
+          if (result.info.role === "assistant" && result.info.error) {
+            const err = result.info.error
+            const detail = "message" in err.data && err.data.message ? err.data.message : err.name
+            if (isTransientError(err)) return yield* Effect.fail(new TransientStepError(detail))
+            return yield* Effect.fail(new Error(detail))
+          }
+
+          return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        })
+
+        // Retry transient failures with exponential backoff (2s, 4s, 8s, …).
+        // Non-transient failures propagate immediately.
+        const withRetry = (attemptIndex: number): Effect.Effect<string> =>
+          attempt().pipe(
+            Effect.catchIf(
+              (error): error is TransientStepError => error instanceof TransientStepError && attemptIndex < retries,
+              () =>
+                Effect.sleep(Duration.seconds(2 ** (attemptIndex + 1))).pipe(
+                  Effect.andThen(withRetry(attemptIndex + 1)),
+                ),
             ),
           )
 
-        if (result.info.role === "assistant" && result.info.error) {
-          const err = result.info.error
-          const detail = "message" in err.data && err.data.message ? err.data.message : err.name
-          return yield* Effect.fail(new Error(detail))
-        }
-
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        return yield* withRetry(0)
       })
 
       const dependents = (root: string) => {
@@ -404,6 +478,9 @@ export const WorkflowTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      formatValidationError: () =>
+        'workflow.steps must be a list; each item is a string, an array of strings, or an object with a "prompt". ' +
+        'Example: {"description":"x","steps":["do a","do b"]}',
       execute: (params: Params, ctx: Tool.Context) => run(params, ctx).pipe(Effect.orDie),
     }
   }),

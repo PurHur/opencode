@@ -38,3 +38,7 @@ Instead of a string, a step may be an object: `{ "prompt": "...", "agent": "gene
 - Max 16 steps, concurrency default 4 (max 8).
 - Each step is a fresh subagent with no memory of the others — put everything it needs in its text.
 - If a step fails, its dependents are skipped and the other results are still returned; check the per-step states in the output.
+
+## Reliability (optional)
+- `retries` (default 2, max 5, 0 disables): retry a step that fails with a transient error such as "loading model", 503, overloaded, connection reset, or timeout, using exponential backoff. Non-transient errors fail immediately.
+- `step_timeout_seconds` (default 0 = no limit, max 3600): cancel a step and mark it a timeout error if it runs longer than this. Useful for a slow or flaky local model that can hang.
