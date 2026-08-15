@@ -220,6 +220,7 @@ const layer = Layer.effect(
               defaults,
               Permission.fromConfig({
                 todowrite: "deny",
+                goal: "deny",
               }),
               user,
             ),

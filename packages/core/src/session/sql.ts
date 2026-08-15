@@ -116,6 +116,25 @@ export const TodoTable = sqliteTable(
   ],
 )
 
+export const GoalTable = sqliteTable(
+  "goal",
+  {
+    id: text().primaryKey(),
+    project_id: text()
+      .$type<ProjectV2.ID>()
+      .notNull()
+      .references(() => ProjectTable.id, { onDelete: "cascade" }),
+    directory: DatabasePath.directoryColumn().notNull(),
+    content: text().notNull(),
+    status: text().$type<"active" | "completed" | "abandoned">().notNull(),
+    priority: integer(),
+    note: text(),
+    ...Timestamps,
+    time_completed: integer(),
+  },
+  (table) => [index("goal_project_directory_idx").on(table.project_id, table.directory)],
+)
+
 export const SessionMessageTable = sqliteTable(
   "session_message",
   {
