@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -17,7 +17,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { type TaskPromptOps } from "../../src/tool/task"
-import { WorkflowTool } from "../../src/tool/workflow"
+import { WorkflowTool, normalizeSteps } from "../../src/tool/workflow"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -243,6 +243,83 @@ describe("tool.workflow", () => {
       // progress reporting: at least one update where a step is still running
       expect(metadata.some((item) => Object.values(item.metadata?.steps ?? {}).includes("running"))).toBe(true)
       expect(metadata.at(-1)?.metadata?.steps).toEqual({ a: "done", b: "done", c: "done", d: "done" })
+    }),
+  )
+
+  it.instance("runs a plain list of strings as a pipeline, feeding each result to the next", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      const prompts: string[] = []
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            prompts.push(promptText(input))
+            return reply(input, prompts.length === 1 ? "FINDINGS" : "SUMMARY")
+          }),
+      }
+
+      const result = yield* def.execute(
+        { description: "research", steps: ["Research the topic", "Write a summary"] },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      // Step 1 gets the bare prompt; step 2 auto-receives step 1's result.
+      expect(prompts[0]).toBe("Research the topic")
+      expect(prompts[1]).toContain("Results from previous steps")
+      expect(prompts[1]).toContain("FINDINGS")
+      expect(prompts[1]).toContain("Write a summary")
+
+      expect(result.metadata.steps).toEqual({ s1: "done", s2: "done" })
+      expect(yield* sessions.children(chat.id)).toHaveLength(2)
+    }),
+  )
+
+  it.instance("runs a batch of strings in parallel, then joins them", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      const barrier = defer<void>()
+      let inFlight = 0
+      let maxInFlight = 0
+      let joinPrompt = ""
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const text = promptText(input)
+            if (text.includes("Scan")) {
+              inFlight++
+              maxInFlight = Math.max(maxInFlight, inFlight)
+              if (inFlight === 2) barrier.resolve()
+              yield* Effect.promise(() => barrier.promise)
+              inFlight--
+              return reply(input, `hit-${text.includes("chain A") ? "A" : "B"}`)
+            }
+            joinPrompt = text
+            return reply(input, "merged")
+          }),
+      }
+
+      const result = yield* awaitWithTimeout(
+        def.execute(
+          { description: "fan out", steps: [["Scan chain A", "Scan chain B"], "Merge the results"] },
+          context({ chat: chat.id, assistant: assistant.id, promptOps }),
+        ),
+        "workflow did not run the batch concurrently",
+        "10 seconds",
+      )
+
+      expect(maxInFlight).toBe(2)
+      expect(joinPrompt).toContain("hit-A")
+      expect(joinPrompt).toContain("hit-B")
+      expect(result.metadata.steps).toEqual({ s1_1: "done", s1_2: "done", s2: "done" })
     }),
   )
 
@@ -488,4 +565,46 @@ describe("tool.workflow", () => {
       }),
     { config: {} },
   )
+})
+
+describe("workflow.normalizeSteps", () => {
+  test("chains plain strings into a sequential pipeline", () => {
+    const steps = normalizeSteps(["research", "analyze", "report"])
+    expect(steps.map((s) => s.id)).toEqual(["s1", "s2", "s3"])
+    expect(steps.map((s) => s.depends_on)).toEqual([[], ["s1"], ["s2"]])
+    expect(steps.map((s) => s.prompt)).toEqual(["research", "analyze", "report"])
+    // string steps auto-inject their (single) dependency's result
+    expect(steps.map((s) => s.autoInject)).toEqual([true, true, true])
+  })
+
+  test("runs a string array as a parallel batch that the next step joins", () => {
+    const steps = normalizeSteps([["scan a", "scan b"], "merge"])
+    expect(steps.map((s) => s.id)).toEqual(["s1_1", "s1_2", "s2"])
+    expect(steps.find((s) => s.id === "s1_1")!.depends_on).toEqual([])
+    expect(steps.find((s) => s.id === "s2")!.depends_on).toEqual(["s1_1", "s1_2"])
+  })
+
+  test("keeps the explicit object form independent unless depends_on is given", () => {
+    const steps = normalizeSteps([
+      { id: "a", prompt: "one" },
+      { id: "b", prompt: "two" },
+      { id: "c", prompt: "merge {{a}} and {{b}}", depends_on: ["a", "b"] },
+    ])
+    expect(steps.find((s) => s.id === "a")!.depends_on).toEqual([])
+    expect(steps.find((s) => s.id === "b")!.depends_on).toEqual([])
+    expect(steps.find((s) => s.id === "c")!.depends_on).toEqual(["a", "b"])
+    // {{a}}/{{b}} placeholders present -> explicit interpolation, no auto-injection
+    expect(steps.find((s) => s.id === "c")!.autoInject).toBe(false)
+  })
+
+  test("auto-generates ids for objects that omit them", () => {
+    const steps = normalizeSteps([{ prompt: "no id" }, { prompt: "also none" }])
+    expect(steps.map((s) => s.id)).toEqual(["s1", "s2"])
+  })
+
+  test("mixes forms, chaining strings onto the preceding step", () => {
+    const steps = normalizeSteps([{ id: "seed", prompt: "seed" }, "follow up"])
+    expect(steps[1].id).toBe("s2")
+    expect(steps[1].depends_on).toEqual(["seed"])
+  })
 })

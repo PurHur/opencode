@@ -322,10 +322,16 @@ describe("TUI inline tool wrapping", () => {
     ])
   })
 
-  test("preserves declared order and defaults unknown/missing step states to pending", () => {
-    const steps = parseWorkflowSteps([{ id: "a", prompt: "x" }, { id: "b", prompt: "y" }], { a: "bogus" }, {})
+  test("uses the metadata step map as the ordered source of truth and defaults unknown states to pending", () => {
+    const steps = parseWorkflowSteps([{ id: "a", prompt: "x" }, { id: "b", prompt: "y" }], { a: "bogus", b: "bogus" }, {})
     expect(steps.map((step) => step.id)).toEqual(["a", "b"])
     expect(steps.every((step) => step.state === "pending")).toBe(true)
+  })
+
+  test("lists auto-generated step ids from metadata even when input steps are plain strings", () => {
+    const steps = parseWorkflowSteps(["research", "summarize"], { s1: "done", s2: "running" }, { s1: "ses_1" })
+    expect(steps.map((step) => step.id)).toEqual(["s1", "s2"])
+    expect(steps.map((step) => step.state)).toEqual(["done", "running"])
   })
 
   test("falls back to metadata step ids when the input is unavailable", () => {

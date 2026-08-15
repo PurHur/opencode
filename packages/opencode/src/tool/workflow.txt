@@ -1,21 +1,40 @@
-Run a fixed set of subagent steps as a dependency graph (DAG). Steps without dependencies run in parallel; a step runs only after every step it depends on has finished.
+Run several subagent steps as one workflow. Each step runs in its own fresh subagent; results flow forward automatically.
+
+## Easiest form (use this)
+Pass `steps` as a plain list of strings. Each string is one task. It runs after the previous one and automatically receives the previous result.
+
+  workflow({
+    "description": "research topic",
+    "steps": [
+      "Research the most active smart contracts on Ethereum and list their addresses",
+      "For each contract from the previous step, scan the source for vulnerabilities",
+      "Write a short report of the findings"
+    ]
+  })
+
+## Run steps in parallel
+Make a step an array of strings. Those run at the same time, and the next step receives all of their results.
+
+  workflow({
+    "description": "scan chains",
+    "steps": [
+      ["Scan Ethereum contracts", "Scan Base contracts", "Scan Arbitrum contracts"],
+      "Combine the findings from all chains into one report"
+    ]
+  })
 
 ## When to use
-- Multi-part work that splits into independent pieces (research several areas, inspect several packages, review several files) and a final step that combines them.
-- You already know the whole plan up front and want it executed deterministically instead of issuing task calls one at a time.
+- Multi-part work you can plan up front: research several things, inspect several targets, then combine.
+- You want it executed in one go instead of issuing task calls one at a time.
 
 ## When NOT to use
 - A single piece of delegated work — use the task tool.
-- Work where each next step depends on reading the previous result yourself before deciding what to do.
+- Work where you must read each result yourself before deciding the next step.
 
-## Parameters
-- `steps[].id` — unique short identifier, referenced by other steps.
-- `steps[].agent` — subagent type to run the step (defaults to `general`).
-- `steps[].prompt` — the instructions for that step. Use `{{otherId}}` to inject the final text of a step listed in `depends_on`.
-- `steps[].depends_on` — ids that must complete first.
-- `concurrency` — max steps running at once (default 4, max 8).
+## Advanced form (only if you need an explicit graph)
+Instead of a string, a step may be an object: `{ "prompt": "...", "agent": "general", "id": "x", "depends_on": ["y"] }`. Use `{{y}}` inside a prompt to inject the result of step `y`. Ids are auto-generated when omitted.
 
 ## Rules
-- Max 16 steps. Ids must be unique, dependencies must exist, and the graph must not contain cycles.
-- Each step runs in its own fresh subagent session with no memory of the others — put everything a step needs in its prompt.
-- If a step fails, its dependents are skipped and the remaining results are still returned; read the per-step states in the output before concluding.
+- Max 16 steps, concurrency default 4 (max 8).
+- Each step is a fresh subagent with no memory of the others — put everything it needs in its text.
+- If a step fails, its dependents are skipped and the other results are still returned; check the per-step states in the output.

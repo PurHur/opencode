@@ -2355,6 +2355,9 @@ function workflowStepState(value: unknown): WorkflowStepState {
 export function parseWorkflowSteps(input: unknown, states: unknown, sessions: unknown): WorkflowStepInfo[] {
   const stateMap = recordValue(states) ?? {}
   const sessionMap = recordValue(sessions) ?? {}
+  // Only the object form of an input step carries an id/agent; plain-string and
+  // parallel-batch steps don't. The metadata `steps` map is authoritative for the
+  // full, ordered set of (normalized) step ids — use input only to label agents.
   const declared = Array.isArray(input)
     ? input.flatMap((item) => {
         const step = recordValue(item)
@@ -2362,7 +2365,7 @@ export function parseWorkflowSteps(input: unknown, states: unknown, sessions: un
         return id ? [{ id, agent: stringValue(step?.agent) }] : []
       })
     : []
-  const ids = declared.length ? declared.map((step) => step.id) : Object.keys(stateMap)
+  const ids = Object.keys(stateMap).length ? Object.keys(stateMap) : declared.map((step) => step.id)
   const agentByID = new Map(declared.map((step) => [step.id, step.agent]))
   return ids.map((id) => ({
     id,

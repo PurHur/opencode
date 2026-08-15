@@ -20,26 +20,32 @@ const RESULT_LIMIT = 8000
 
 export type StepState = "pending" | "running" | "done" | "error" | "skipped"
 
-const Step = Schema.Struct({
-  id: Schema.String.annotate({
-    description: "Unique short identifier for this step, referenced by other steps in depends_on and {{id}}",
+// Advanced form: an explicit step object for a dependency graph.
+const StepObject = Schema.Struct({
+  id: Schema.optional(Schema.String).annotate({
+    description: "Optional unique id, referenced by other steps in depends_on and {{id}}. Auto-generated if omitted.",
   }),
   agent: Schema.optional(Schema.String).annotate({
     description: `The type of specialized agent to run this step (defaults to "${DEFAULT_AGENT}")`,
   }),
   prompt: Schema.String.annotate({
-    description:
-      "The instructions for this step. Use {{otherId}} to inject the final text of a step listed in depends_on",
+    description: "The instructions for this step. Use {{otherId}} to inject the final text of a step in depends_on",
   }),
   depends_on: Schema.optional(Schema.Array(Schema.String)).annotate({
     description: "Step ids that must complete before this step starts",
   }),
 }).annotate({ identifier: "WorkflowStep" })
 
+// Each step is the simple string form, a parallel batch of strings, or the advanced object.
+const StepEntry = Schema.Union([Schema.String, Schema.Array(Schema.String), StepObject])
+
 export const Parameters = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the workflow" }),
-  steps: Schema.mutable(Schema.Array(Step)).annotate({
-    description: `The steps to run, at most ${MAX_STEPS}`,
+  steps: Schema.mutable(Schema.Array(StepEntry)).annotate({
+    description:
+      "The steps to run in order. Each step is EITHER a plain string (a task that runs after the previous " +
+      "step and automatically receives its result), OR an array of strings (tasks that run in parallel), OR an " +
+      `object {prompt, agent?, depends_on?, id?} for an explicit graph. Most workflows are just a list of strings. At most ${MAX_STEPS} steps.`,
   }),
   concurrency: Schema.optional(Schema.Number).annotate({
     description: `Maximum number of steps to run at once (default ${DEFAULT_CONCURRENCY}, max ${MAX_CONCURRENCY})`,
@@ -47,7 +53,46 @@ export const Parameters = Schema.Struct({
 })
 
 type Params = Schema.Schema.Type<typeof Parameters>
-type StepInput = Params["steps"][number]
+type RawStep = Params["steps"][number]
+
+// Internal, fully-resolved step used by the scheduler.
+type StepInput = {
+  id: string
+  agent?: string
+  prompt: string
+  depends_on: string[]
+  autoInject: boolean // prepend dependency results when the prompt has no {{id}} placeholders
+}
+
+// Turn the flexible input (strings / batches / objects) into an explicit DAG.
+// Plain strings and batches chain onto whatever ran immediately before them, so
+// `["a", "b", "c"]` is a pipeline and `["a", ["b", "c"], "d"]` fans out then joins.
+export function normalizeSteps(raw: RawStep[]): StepInput[] {
+  const out: StepInput[] = []
+  let previous: string[] = []
+  raw.forEach((entry, index) => {
+    const batch = typeof entry === "string" ? [entry] : Array.isArray(entry) ? [...entry] : undefined
+    if (batch) {
+      const ids: string[] = []
+      batch.forEach((prompt, offset) => {
+        const id = batch.length > 1 ? `s${index + 1}_${offset + 1}` : `s${index + 1}`
+        out.push({ id, prompt, depends_on: [...previous], autoInject: true })
+        ids.push(id)
+      })
+      previous = ids
+      return
+    }
+    // The explicit object form controls its own dependencies: omitting depends_on
+    // means "no dependencies" (an independent root), unlike the auto-chained strings.
+    const step = entry as { id?: string; agent?: string; prompt: string; depends_on?: readonly string[] }
+    const id = step.id?.trim() || `s${index + 1}`
+    const depends_on = step.depends_on ? [...step.depends_on] : []
+    const autoInject = depends_on.length > 0 && !depends_on.some((dep) => step.prompt.includes(`{{${dep}}}`))
+    out.push({ id, agent: step.agent, prompt: step.prompt, depends_on, autoInject })
+    previous = [id]
+  })
+  return out
+}
 
 type Metadata = {
   description: string
@@ -87,22 +132,23 @@ export function layers(steps: StepInput[]) {
   return out
 }
 
-function validate(params: Params) {
-  if (params.steps.length === 0) return "steps must not be empty"
-  if (params.steps.length > MAX_STEPS) return `too many steps (${params.steps.length}), the maximum is ${MAX_STEPS}`
+function validate(steps: StepInput[]) {
+  if (steps.length === 0) return "steps must not be empty"
+  if (steps.length > MAX_STEPS) return `too many steps (${steps.length}), the maximum is ${MAX_STEPS}`
   const ids = new Set<string>()
-  for (const step of params.steps) {
+  for (const step of steps) {
     if (!step.id.trim()) return "every step needs a non-empty id"
+    if (!step.prompt.trim()) return `step "${step.id}" needs a non-empty prompt`
     if (ids.has(step.id)) return `duplicate step id "${step.id}"`
     ids.add(step.id)
   }
-  for (const step of params.steps) {
-    for (const dep of step.depends_on ?? []) {
+  for (const step of steps) {
+    for (const dep of step.depends_on) {
       if (dep === step.id) return `step "${step.id}" depends on itself`
       if (!ids.has(dep)) return `step "${step.id}" depends on unknown step "${dep}"`
     }
   }
-  if (!layers(params.steps)) return "steps contain a dependency cycle"
+  if (!layers(steps)) return "steps contain a dependency cycle"
   return undefined
 }
 
@@ -134,7 +180,8 @@ export const WorkflowTool = Tool.define(
     const run = Effect.fn("WorkflowTool.execute")(function* (params: Params, ctx: Tool.Context) {
       const cfg = yield* config.get()
 
-      const invalid = validate(params)
+      const steps = normalizeSteps(params.steps)
+      const invalid = validate(steps)
       if (invalid) return yield* Effect.fail(new Error(`Invalid workflow: ${invalid}`))
 
       const parent = yield* sessions.get(ctx.sessionID)
@@ -153,7 +200,7 @@ export const WorkflowTool = Tool.define(
       }
 
       const resolved = new Map<string, Agent.Info>()
-      for (const name of new Set(params.steps.map((step) => step.agent ?? DEFAULT_AGENT))) {
+      for (const name of new Set(steps.map((step) => step.agent ?? DEFAULT_AGENT))) {
         const info = yield* agents.get(name)
         if (!info) return yield* Effect.fail(new Error(`Unknown agent type: ${name} is not a valid agent type`))
         resolved.set(name, info)
@@ -166,7 +213,7 @@ export const WorkflowTool = Tool.define(
           always: ["*"],
           metadata: {
             description: params.description,
-            steps: params.steps.map((step) => step.id),
+            steps: steps.map((step) => step.id),
           },
         })
       }
@@ -182,8 +229,8 @@ export const WorkflowTool = Tool.define(
       const ops = ctx.extra?.promptOps as TaskPromptOps
       if (!ops) return yield* Effect.fail(new Error("WorkflowTool requires promptOps in ctx.extra"))
 
-      const order = layers(params.steps)!
-      const states: Record<string, StepState> = Object.fromEntries(params.steps.map((step) => [step.id, "pending"]))
+      const order = layers(steps)!
+      const states: Record<string, StepState> = Object.fromEntries(steps.map((step) => [step.id, "pending"]))
       const results: Record<string, string> = {}
       const childSessions: Record<string, string> = {}
       const running = new Set<SessionID>()
@@ -242,8 +289,18 @@ export const WorkflowTool = Tool.define(
         yield* report()
 
         let prompt = step.prompt
-        for (const dep of step.depends_on ?? []) {
+        for (const dep of step.depends_on) {
           prompt = prompt.split(`{{${dep}}}`).join(truncate(results[dep] ?? ""))
+        }
+        // For simple string steps (no {{id}} placeholders), automatically feed the
+        // dependency results forward so a plain list of steps behaves as a pipeline.
+        if (step.autoInject) {
+          const context = step.depends_on
+            .map((dep) => results[dep])
+            .filter((value): value is string => Boolean(value && value.trim()))
+            .map((value) => `<result>\n${truncate(value)}\n</result>`)
+            .join("\n")
+          if (context) prompt = `Results from previous steps:\n${context}\n\nYour task:\n${prompt}`
         }
 
         const parts = yield* ops.resolvePromptParts(prompt)
@@ -279,9 +336,9 @@ export const WorkflowTool = Tool.define(
         let grew = true
         while (grew) {
           grew = false
-          for (const step of params.steps) {
+          for (const step of steps) {
             if (marked.has(step.id)) continue
-            if ((step.depends_on ?? []).some((dep) => marked.has(dep))) {
+            if (step.depends_on.some((dep) => marked.has(dep))) {
               marked.add(step.id)
               grew = true
             }
@@ -300,7 +357,7 @@ export const WorkflowTool = Tool.define(
           yield* Effect.forEach(
             pending,
             Effect.fnUntraced(function* (stepID: string) {
-              const step = params.steps.find((item) => item.id === stepID)!
+              const step = steps.find((item) => item.id === stepID)!
               const exit = yield* runStep(step).pipe(Effect.exit)
               if (exit._tag === "Success") {
                 states[step.id] = "done"
@@ -325,7 +382,7 @@ export const WorkflowTool = Tool.define(
         ),
       )
 
-      const counts = params.steps.reduce(
+      const counts = steps.reduce(
         (acc, step) => {
           acc[states[step.id]]++
           return acc
@@ -334,13 +391,13 @@ export const WorkflowTool = Tool.define(
       )
 
       return {
-        title: `${params.description} (${counts.done}/${params.steps.length})`,
+        title: `${params.description} (${counts.done}/${steps.length})`,
         metadata: {
           description: params.description,
           steps: { ...states },
           sessions: { ...childSessions },
         } satisfies Metadata,
-        output: renderOutput({ description: params.description, steps: params.steps, states, results }),
+        output: renderOutput({ description: params.description, steps, states, results }),
       }
     })
 
