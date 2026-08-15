@@ -265,6 +265,12 @@ export const WorkflowTool = Tool.define(
             ),
           )
 
+        if (result.info.role === "assistant" && result.info.error) {
+          const err = result.info.error
+          const detail = "message" in err.data && err.data.message ? err.data.message : err.name
+          return yield* Effect.fail(new Error(detail))
+        }
+
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 

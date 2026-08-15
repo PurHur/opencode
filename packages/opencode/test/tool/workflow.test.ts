@@ -124,6 +124,13 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
   }
 }
 
+function replyWithError(input: SessionPrompt.PromptInput, message: string): SessionV1.WithParts {
+  const result = reply(input, "")
+  if (result.info.role === "assistant")
+    result.info.error = { name: "APIError", data: { message, isRetryable: true } }
+  return result
+}
+
 function promptText(input: SessionPrompt.PromptInput) {
   return input.parts.find((part) => part.type === "text")?.text ?? ""
 }
@@ -362,6 +369,39 @@ describe("tool.workflow", () => {
       expect(result.output).toContain(`<step id="d" agent="general" state="skipped">`)
       expect(result.output).toContain("result-c")
       expect(result.title).toContain("2/5")
+    }),
+  )
+
+  it.instance("marks a step errored when the child turn reports an API error", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const step = stepOf(input)
+            if (step === "a") return replyWithError(input, "Loading model")
+            return reply(input, `result-${step}`)
+          }),
+      }
+
+      const result = yield* def.execute(
+        {
+          description: "child error",
+          steps: [
+            { id: "a", prompt: "a|one" },
+            { id: "b", prompt: "b|from {{a}}", depends_on: ["a"] },
+          ],
+        },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      expect(result.metadata.steps).toEqual({ a: "error", b: "skipped" })
+      expect(result.output).toContain(`<step id="a" agent="general" state="error">`)
+      expect(result.output).toContain("Loading model")
+      expect(result.output).toContain(`<step id="b" agent="general" state="skipped">`)
     }),
   )
 
