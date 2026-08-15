@@ -2464,14 +2464,27 @@ export function Workflow(props: ToolProps) {
     () => stringValue(props.metadata.description) ?? stringValue(props.input.description) ?? "workflow",
   )
   const steps = createMemo(() => parseWorkflowSteps(props.input.steps, props.metadata.steps, props.metadata.sessions))
+  // Only derive duration from part.state.time — never from wall-clock — and only once
+  // the tool has completed, so we never render a jittering elapsed timer.
+  const duration = createMemo(() => {
+    const state = props.part.state
+    if (state.status !== "completed") return undefined
+    const { start, end } = state.time
+    if (typeof start !== "number" || typeof end !== "number" || end < start) return undefined
+    return Locale.duration(end - start)
+  })
   const summary = createMemo(() => {
     const all = steps()
     const done = all.filter((step) => step.state === "done").length
+    const running = all.filter((step) => step.state === "running").length
     const failed = all.filter((step) => step.state === "error").length
     const skipped = all.filter((step) => step.state === "skipped").length
     const detail = [`${done}/${all.length} done`]
+    if (running) detail.push(`${running} running`)
     if (failed) detail.push(`${failed} failed`)
     if (skipped) detail.push(`${skipped} skipped`)
+    const dur = duration()
+    if (dur) detail.push(dur)
     return detail.join(" · ")
   })
 
