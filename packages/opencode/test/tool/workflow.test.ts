@@ -467,6 +467,7 @@ describe("tool.workflow", () => {
       const result = yield* def.execute(
         {
           description: "child error",
+          retries: 0,
           steps: [
             { id: "a", prompt: "a|one" },
             { id: "b", prompt: "b|from {{a}}", depends_on: ["a"] },
@@ -479,6 +480,157 @@ describe("tool.workflow", () => {
       expect(result.output).toContain(`<step id="a" agent="general" state="error">`)
       expect(result.output).toContain("Loading model")
       expect(result.output).toContain(`<step id="b" agent="general" state="skipped">`)
+    }),
+  )
+
+  it.instance("retries a step that fails transiently, then succeeds", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+      const attempts: Record<string, number> = {}
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const step = stepOf(input)
+            attempts[step] = (attempts[step] ?? 0) + 1
+            // First attempt at "a" reports a transient "Loading model" error.
+            if (step === "a" && attempts[step] === 1) return replyWithError(input, "503 Loading model")
+            return reply(input, `result-${step}`)
+          }),
+      }
+
+      const result = yield* awaitWithTimeout(
+        def.execute(
+          {
+            description: "retry then succeed",
+            steps: [
+              { id: "a", prompt: "a|one" },
+              { id: "b", prompt: "b|from {{a}}", depends_on: ["a"] },
+            ],
+          },
+          context({ chat: chat.id, assistant: assistant.id, promptOps }),
+        ),
+        "workflow retry did not complete",
+        "20 seconds",
+      )
+
+      expect(attempts["a"]).toBe(2)
+      expect(result.metadata.steps).toEqual({ a: "done", b: "done" })
+      expect(result.output).toContain("result-a")
+      expect(result.output).toContain("result-b")
+    }),
+  )
+
+  it.instance("does not retry a non-transient error and skips dependents", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+      const attempts: Record<string, number> = {}
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const step = stepOf(input)
+            attempts[step] = (attempts[step] ?? 0) + 1
+            if (step === "a") {
+              const failed = reply(input, "")
+              if (failed.info.role === "assistant")
+                failed.info.error = { name: "APIError", data: { message: "bad request", statusCode: 400, isRetryable: false } }
+              return failed
+            }
+            return reply(input, `result-${step}`)
+          }),
+      }
+
+      const result = yield* def.execute(
+        {
+          description: "non-transient",
+          steps: [
+            { id: "a", prompt: "a|one" },
+            { id: "b", prompt: "b|from {{a}}", depends_on: ["a"] },
+          ],
+        },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      // A non-transient error must not be retried.
+      expect(attempts["a"]).toBe(1)
+      expect(result.metadata.steps).toEqual({ a: "error", b: "skipped" })
+      expect(result.output).toContain("bad request")
+    }),
+  )
+
+  it.instance("times out a step whose child never resolves", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+      const never = defer<SessionV1.WithParts>()
+      const cancels: SessionID[] = []
+      const promptOps: TaskPromptOps = {
+        cancel: (sessionID) =>
+          Effect.sync(() => {
+            cancels.push(sessionID)
+          }),
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: () => Effect.promise(() => never.promise),
+      }
+
+      const result = yield* awaitWithTimeout(
+        def.execute(
+          { description: "timeout", step_timeout_seconds: 1, steps: [{ id: "a", prompt: "a|hang forever" }] },
+          context({ chat: chat.id, assistant: assistant.id, promptOps }),
+        ),
+        "workflow did not time out the hung step",
+        "20 seconds",
+      )
+
+      expect(result.metadata.steps).toEqual({ a: "error" })
+      expect(result.output).toContain("step timed out after 1s")
+      // The hung child must have been cancelled.
+      expect(cancels.length).toBeGreaterThanOrEqual(1)
+    }),
+  )
+
+  it.instance("stops retrying after the retry limit and fails the step", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+      const attempts: Record<string, number> = {}
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const step = stepOf(input)
+            attempts[step] = (attempts[step] ?? 0) + 1
+            if (step === "a") return replyWithError(input, "Loading model")
+            return reply(input, `result-${step}`)
+          }),
+      }
+
+      const result = yield* awaitWithTimeout(
+        def.execute(
+          {
+            description: "retry limit",
+            retries: 1,
+            steps: [
+              { id: "a", prompt: "a|one" },
+              { id: "b", prompt: "b|from {{a}}", depends_on: ["a"] },
+            ],
+          },
+          context({ chat: chat.id, assistant: assistant.id, promptOps }),
+        ),
+        "workflow retry-limit did not complete",
+        "20 seconds",
+      )
+
+      // 1 initial attempt + 1 retry, then give up.
+      expect(attempts["a"]).toBe(2)
+      expect(result.metadata.steps).toEqual({ a: "error", b: "skipped" })
+      expect(result.output).toContain("Loading model")
     }),
   )
 
