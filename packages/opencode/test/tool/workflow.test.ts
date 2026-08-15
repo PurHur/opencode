@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Effect, Exit, Fiber } from "effect"
+import { Cause, Effect, Exit, Fiber } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -126,8 +126,7 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
 
 function replyWithError(input: SessionPrompt.PromptInput, message: string): SessionV1.WithParts {
   const result = reply(input, "")
-  if (result.info.role === "assistant")
-    result.info.error = { name: "APIError", data: { message, isRetryable: true } }
+  if (result.info.role === "assistant") result.info.error = { name: "APIError", data: { message, isRetryable: true } }
   return result
 }
 
@@ -538,7 +537,10 @@ describe("tool.workflow", () => {
             if (step === "a") {
               const failed = reply(input, "")
               if (failed.info.role === "assistant")
-                failed.info.error = { name: "APIError", data: { message: "bad request", statusCode: 400, isRetryable: false } }
+                failed.info.error = {
+                  name: "APIError",
+                  data: { message: "bad request", statusCode: 400, isRetryable: false },
+                }
               return failed
             }
             return reply(input, `result-${step}`)
@@ -716,6 +718,145 @@ describe("tool.workflow", () => {
         expect(yield* sessions.children(child.id)).toHaveLength(0)
       }),
     { config: {} },
+  )
+
+  it.instance("plans a goal into steps then runs them", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      const prompts: string[] = []
+      let plannerPrompt = ""
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const text = promptText(input)
+            // The planning turn is recognised by the instruction it carries.
+            if (text.includes("Break this goal")) {
+              plannerPrompt = text
+              return reply(input, '["research X","summarize"]')
+            }
+            prompts.push(text)
+            return reply(input, `ok-${prompts.length}`)
+          }),
+      }
+
+      const result = yield* def.execute(
+        { description: "auto plan", goal: "understand X" },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      // The planner saw the goal, and the returned array became the steps.
+      expect(plannerPrompt).toContain("understand X")
+      expect(result.metadata.plan).toEqual(["research X", "summarize"])
+      expect(result.metadata.steps).toEqual({ s1: "done", s2: "done" })
+      expect(prompts[0]).toBe("research X")
+      expect(prompts[1]).toContain("summarize")
+      expect(prompts[1]).toContain("Results from previous steps")
+      expect(result.output).toContain("<plan>")
+      expect(result.output).toContain("research X")
+      expect(result.output).toContain("ok-1")
+      expect(result.output).toContain("ok-2")
+      // one planner child + two step children
+      expect(yield* sessions.children(chat.id)).toHaveLength(3)
+    }),
+  )
+
+  it.instance("parses a planner reply wrapped in a markdown code fence", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) => {
+          const text = promptText(input)
+          if (text.includes("Break this goal"))
+            return Effect.succeed(reply(input, 'Here is the plan:\n```json\n["alpha", "beta"]\n```'))
+          return Effect.succeed(reply(input, "done"))
+        },
+      }
+
+      const result = yield* def.execute(
+        { description: "fenced plan", goal: "do the thing" },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      expect(result.metadata.plan).toEqual(["alpha", "beta"])
+      expect(result.metadata.steps).toEqual({ s1: "done", s2: "done" })
+    }),
+  )
+
+  it.instance("fails clearly when the planner returns no usable steps", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) => {
+          const text = promptText(input)
+          if (text.includes("Break this goal")) return Effect.succeed(reply(input, "I cannot help with that."))
+          return Effect.succeed(reply(input, "done"))
+        },
+      }
+
+      const exit = yield* def
+        .execute(
+          { description: "bad plan", goal: "impossible" },
+          context({ chat: chat.id, assistant: assistant.id, promptOps }),
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const err = Cause.squash(exit.cause)
+        const message = err instanceof Error ? err.message : String(err)
+        expect(message).toContain("planner did not return any steps")
+      }
+    }),
+  )
+
+  it.instance("truncates a long dependency result keeping both head and tail", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* WorkflowTool).init()
+
+      // A dependency result well over the 8000-char limit; the head and tail
+      // markers must both survive the truncation when injected downstream.
+      const big = "HEAD-" + "x".repeat(9000) + "-TAIL"
+      let downstream = ""
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.gen(function* () {
+            const text = promptText(input)
+            if (text.includes("Second")) {
+              downstream = text
+              return reply(input, "done")
+            }
+            return reply(input, big)
+          }),
+      }
+
+      const result = yield* def.execute(
+        { description: "trunc", steps: ["First step", "Second step"] },
+        context({ chat: chat.id, assistant: assistant.id, promptOps }),
+      )
+
+      expect(result.metadata.steps).toEqual({ s1: "done", s2: "done" })
+      expect(downstream).toContain("HEAD-")
+      expect(downstream).toContain("-TAIL")
+      expect(downstream).toContain("[truncated")
+      // the middle was collapsed, so the injected text is shorter than the raw result
+      expect(downstream.length).toBeLessThan(big.length)
+    }),
   )
 })
 
