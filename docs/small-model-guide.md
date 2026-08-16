@@ -157,3 +157,27 @@ Tips that matter most on a weak model:
   `planner did not return any steps` if it cannot produce one. When you already know
   the plan, write the steps yourself — it is the lower-ceremony call. See
   [dynamic planning](./native-orchestration.md#form-4--a-goal-dynamic-planning).
+
+## Repetition loops (small / quantized models)
+
+Small and abliterated models often fall into **degenerate repetition loops** — emitting
+the same short unit over and over until they hit the output-token cap. This wastes minutes,
+and the garbage pollutes the context so later turns (and compaction) get worse.
+
+Two layers of defense:
+
+**1. Prevent it at the model (most important).** Enable anti-repetition sampling on your
+server. A llama.cpp server with the defaults (`repeat_penalty=1.0`, `frequency_penalty=0`,
+`dry_multiplier=0`) has *no* loop suppression. Relaunch `llama-server` with, e.g.:
+
+```
+--repeat-penalty 1.1 --repeat-last-n 256 \
+--dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 2
+```
+
+DRY sampling in particular is very effective at killing verbatim loops.
+
+**2. This fork aborts runaway loops automatically.** If the streamed output/reasoning still
+degenerates into a back-to-back repetition, opencode detects it and aborts that step with a
+clear error instead of running to the token cap and poisoning the context. Set
+`OPENCODE_LOOP_GUARD=0` to disable the guard.

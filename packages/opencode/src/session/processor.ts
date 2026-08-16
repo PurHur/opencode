@@ -27,6 +27,38 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+
+// Small / quantized models frequently fall into degenerate repetition loops
+// (the same short unit emitted over and over) that otherwise run all the way to
+// the output-token cap, waste minutes, and poison the context for later turns.
+// Detect a runaway loop in the streamed text/reasoning and abort the step early.
+const LOOP_GUARD_ENABLED = process.env["OPENCODE_LOOP_GUARD"] !== "0"
+const LOOP_MIN_CHARS = 6000 // only inspect once a part is long enough to be suspicious
+const LOOP_CHECK_STRIDE = 1000 // re-check at most this often (chars) per part
+const LOOP_TAIL = 2000 // window at the end of the text to inspect
+const LOOP_MAX_PERIOD = 200 // longest repeating unit to consider
+const LOOP_MIN_REPEATS = 10 // unit must repeat at least this many times, back-to-back
+const LOOP_MIN_COVERAGE = 800 // ...and cover at least this many chars of pure repetition
+
+// True when the tail of `text` is a short unit repeated back-to-back enough times
+// to be a runaway loop rather than legitimately repetitive content.
+export function detectRepetitionLoop(text: string): boolean {
+  if (text.length < LOOP_MIN_CHARS) return false
+  const tail = text.slice(-LOOP_TAIL)
+  for (let period = 1; period <= LOOP_MAX_PERIOD; period++) {
+    const unit = tail.slice(tail.length - period)
+    if (!unit.trim()) continue
+    let repeats = 1
+    let pos = tail.length - 2 * period
+    while (pos >= 0 && tail.slice(pos, pos + period) === unit) {
+      repeats++
+      pos -= period
+    }
+    if (repeats >= LOOP_MIN_REPEATS && period * repeats >= LOOP_MIN_COVERAGE) return true
+  }
+  return false
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -113,6 +145,19 @@ const layer = Layer.effect(
         reasoningMap: {},
       }
       let aborted = false
+
+      // Per-part throttle for the repetition-loop guard (keyed by part id).
+      const loopChecked = new Map<string, number>()
+      const guardLoop = (partID: string, text: string) => {
+        if (!LOOP_GUARD_ENABLED || text.length < LOOP_MIN_CHARS) return
+        if (text.length - (loopChecked.get(partID) ?? 0) < LOOP_CHECK_STRIDE) return
+        loopChecked.set(partID, text.length)
+        if (detectRepetitionLoop(text))
+          throw new Error(
+            "Aborted a runaway repetition loop in the model output. Small/quantized models can loop; " +
+              "try setting repeat_penalty/frequency_penalty, lowering temperature, or using a stronger model.",
+          )
+      }
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -295,6 +340,7 @@ const layer = Layer.effect(
             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
             if (!(value.id in ctx.reasoningMap)) return
             ctx.reasoningMap[value.id].text += value.text
+            guardLoop(ctx.reasoningMap[value.id].id, ctx.reasoningMap[value.id].text)
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
             yield* session.updatePartDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
@@ -499,6 +545,7 @@ const layer = Layer.effect(
           case "text-delta":
             if (!ctx.currentText) return
             ctx.currentText.text += value.text
+            guardLoop(ctx.currentText.id, ctx.currentText.text)
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
