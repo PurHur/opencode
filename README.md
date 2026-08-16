@@ -1,129 +1,91 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# opencode — native orchestration fork
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+A fork of **[sst/opencode](https://github.com/sst/opencode)**. For everything about
+opencode itself (install, usage, config, providers, TUI, SDK), see the **[original
+README](https://github.com/sst/opencode#readme)** and **[opencode.ai/docs](https://opencode.ai/docs)**.
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+This document only covers **what this fork adds or changes.** The goal of the fork
+is to make dynamic, multi-agent workflows work well — including with small / local
+models served over an OpenAI-compatible endpoint (e.g. a quantized model under
+llama.cpp).
+
+Everything below is implemented natively (built-in tools + TUI rendering), not via
+plugins. Full guides:
+
+- **[docs/native-orchestration.md](docs/native-orchestration.md)** — the three new tools, with copy-paste examples
+- **[docs/small-model-guide.md](docs/small-model-guide.md)** — running the fork against a small / local model
+- **[examples/](examples/)** — a tuned `small-model-config.jsonc` and ready-made `opencode-commands/`
 
 ---
 
-### Installation
+## What's new
 
-```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
+### 1. `workflow` — deterministic multi-agent workflows
 
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
-```
+Runs several subagent steps as one workflow, each in its own fresh subagent session,
+in parallel where dependencies allow. Designed to be trivial for a weak model to call.
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+- **Simple form:** `steps` is just a list of strings; each step runs after the
+  previous one and automatically receives its result (a pipeline).
+  ```json
+  { "description": "research topic",
+    "steps": ["Research active contracts and list addresses",
+              "Scan each for vulnerabilities",
+              "Write a report"] }
+  ```
+- **Parallel batch:** a step can be an array of strings — they run at once and the
+  next step receives all of their results: `["Scan chain A", "Scan chain B"]`.
+- **Explicit graph (advanced):** a step can be an object
+  `{ prompt, agent?, depends_on?, id? }` with `{{id}}` result interpolation.
+- **Dynamic planning:** pass a `goal` instead of `steps` and a planner subagent
+  expands it into steps, then runs them.
+- **Reliability for flaky local backends:** `retries` (default 2) retries a step on
+  transient errors (e.g. `loading model`, 503, connection reset) with backoff;
+  `step_timeout_seconds` bounds a hung step. Long step results are head+tail
+  truncated when fed forward. A failed step skips its dependents and the rest still
+  return. Malformed calls get a corrective, small-model-friendly error message.
+- **Live in the TUI:** renders as an inline block with per-step status glyphs
+  (`✓ • ✗ – ○`), running-subagent activity, elapsed time, and counts — and each step
+  row is **clickable** to open that subagent's session and watch its output.
 
-### Desktop App (BETA)
+### 2. `agent_create` — dynamic subagents at runtime
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
+Lets the model define a new subagent on the fly (`name`, `description`, `prompt`,
+optional `model`) and immediately spawn it via the `task` tool. With `persist: true`
+it's written to `.opencode/agent/<name>.md` so it survives restarts.
 
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+### 3. `goal` — persistent, project-scoped goals
 
-```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
+A single `goal` tool with `action: add | complete | abandon | list`. Goals are
+stored per project (SQLite), persist across sessions, and are re-surfaced to the
+model each turn so long-running objectives don't get lost.
 
-#### Installation Directory
+### 4. Small / local model support
 
-The install script respects the following priority order for the installation path:
-
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
-
-```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
-
-### Agents
-
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
-
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
-
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
-
-Learn more about [agents](https://opencode.ai/docs/agents).
-
-### Documentation
-
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
-
-### Contributing
-
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
-
-### Building on OpenCode
-
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+- `examples/small-model-config.jsonc` — a commented config for a local
+  OpenAI-compatible (llama.cpp) endpoint.
+- `docs/small-model-guide.md` — setup, the single-slot-server concurrency caveat,
+  and tips (prefer the string-list workflow form; keep concurrency low).
+- `OPENCODE_THEME_MODE=dark|light` — forces the TUI theme mode synchronously at
+  startup, bypassing terminal background auto-detection (which is unreliable inside
+  `screen`/`tmux` and can render a light palette on a dark terminal).
 
 ---
 
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+## Build & run this fork
+
+```sh
+bun install
+bun run --cwd packages/opencode build   # or: bun dev run "..."
+```
+
+Point it at your model with a config like `examples/small-model-config.jsonc`.
+Tests: `cd packages/opencode && bun test`.
+
+## Status
+
+Feature branch: `feat/native-orchestration`. All new tools ship with unit tests and
+the new TUI rendering has render tests. See
+[`specs/native-orchestration.md`](specs/native-orchestration.md) and
+[`specs/improvement-roadmap.md`](specs/improvement-roadmap.md) for design notes and
+the remaining backlog.
