@@ -1,4 +1,5 @@
 import * as InstanceState from "@/effect/instance-state"
+import { Goal } from "@/session/goal"
 import { Project } from "@/project/project"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Effect } from "effect"
@@ -11,6 +12,7 @@ export const projectHandlers = HttpApiBuilder.group(InstanceHttpApi, "project", 
   Effect.gen(function* () {
     const svc = yield* Project.Service
     const project = yield* ProjectV2.Service
+    const goalSvc = yield* Goal.Service
 
     const list = Effect.fn("ProjectHttpApi.list")(function* () {
       return yield* svc.list()
@@ -53,11 +55,16 @@ export const projectHandlers = HttpApiBuilder.group(InstanceHttpApi, "project", 
       project.directories({ projectID: ctx.params.projectID }),
     )
 
+    const goals = Effect.fn("ProjectHttpApi.goals")(function* () {
+      return yield* goalSvc.list()
+    })
+
     return handlers
       .handle("list", list)
       .handle("current", current)
       .handle("initGit", initGit)
       .handle("update", update)
       .handle("directories", directories)
+      .handle("goals", goals)
   }),
 )

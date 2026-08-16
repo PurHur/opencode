@@ -6,6 +6,7 @@ import type {
   Part,
   Config,
   Todo,
+  Goal,
   Command,
   PermissionRequest,
   QuestionRequest,
@@ -96,6 +97,9 @@ export const {
       todo: {
         [sessionID: string]: Todo[]
       }
+      goal: {
+        [directory: string]: Goal[]
+      }
       message: {
         [sessionID: string]: Message[]
       }
@@ -134,6 +138,7 @@ export const {
       session_status: {},
       session_diff: {},
       todo: {},
+      goal: {},
       message: {},
       part: {},
       lsp: [],
@@ -264,6 +269,10 @@ export const {
 
         case "todo.updated":
           setStore("todo", event.properties.sessionID, event.properties.todos)
+          break
+
+        case "goal.updated":
+          setStore("goal", event.properties.directory, [...event.properties.goals])
           break
 
         case "session.diff":
@@ -527,6 +536,13 @@ export const {
               .list({ workspace })
               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+            sdk.client.project.goals({ workspace }).then((x) => {
+              const byDirectory: { [directory: string]: Goal[] } = {}
+              for (const goal of x.data ?? []) {
+                ;(byDirectory[goal.directory] ??= []).push(goal)
+              }
+              setStore("goal", reconcile(byDirectory))
+            }),
             sdk.client.session.status({ workspace }).then((x) => {
               setStore("session_status", reconcile(x.data ?? {}))
             }),

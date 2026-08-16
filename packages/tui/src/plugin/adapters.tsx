@@ -131,6 +131,10 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
       todo(sessionID) {
         return sync.data.todo[sessionID] ?? []
       },
+      goal(sessionID) {
+        const dir = sync.session.get(sessionID)?.directory
+        return dir ? (sync.data.goal[dir] ?? []) : []
+      },
       messages(sessionID) {
         return sync.data.message[sessionID] ?? []
       },

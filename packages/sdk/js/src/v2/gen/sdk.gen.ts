@@ -135,6 +135,8 @@ import type {
   ProjectCurrentResponses,
   ProjectDirectoriesErrors,
   ProjectDirectoriesResponses,
+  ProjectGoalsErrors,
+  ProjectGoalsResponses,
   ProjectIcon,
   ProjectInitGitErrors,
   ProjectInitGitResponses,
@@ -2658,6 +2660,36 @@ export class Project extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+
+  /**
+   * List goals
+   *
+   * Retrieve the goals for the currently active project and directory.
+   */
+  public goals<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ProjectGoalsResponses, ProjectGoalsErrors, ThrowOnError>({
+      url: "/goal",
+      ...options,
+      ...params,
     })
   }
 

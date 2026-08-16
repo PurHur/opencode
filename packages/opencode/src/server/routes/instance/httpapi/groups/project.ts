@@ -1,3 +1,4 @@
+import { Goal } from "@/session/goal"
 import { Project } from "@/project/project"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Schema } from "effect"
@@ -60,6 +61,16 @@ export const ProjectApi = HttpApi.make("project")
             identifier: "project.update",
             summary: "Update project",
             description: "Update project properties such as name, icon, and commands.",
+          }),
+        ),
+        HttpApiEndpoint.get("goals", `/goal`, {
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(Goal.Info), "Goals for the active project and directory"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "project.goals",
+            summary: "List goals",
+            description: "Retrieve the goals for the currently active project and directory.",
           }),
         ),
         HttpApiEndpoint.get("directories", `${root}/:projectID/directories`, {

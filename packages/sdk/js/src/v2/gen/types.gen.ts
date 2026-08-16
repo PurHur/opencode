@@ -68,6 +68,7 @@ export type Event =
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
   | EventTodoUpdated
+  | EventGoalUpdated
   | EventLspUpdated
   | EventPermissionAsked
   | EventPermissionReplied
@@ -668,6 +669,23 @@ export type Todo = {
    * Priority level of the task: high, medium, low
    */
   priority: string
+}
+
+export type Goal = {
+  id: string
+  projectID: string
+  directory: string
+  /**
+   * What the goal is
+   */
+  content: string
+  status: GoalStatus
+  /**
+   * Lower sorts first
+   */
+  priority?: number
+  note?: string
+  time: GoalTime
 }
 
 export type SessionStatus =
@@ -1364,6 +1382,15 @@ export type GlobalEvent = {
         properties: {
           sessionID: string
           todos: Array<Todo>
+        }
+      }
+    | {
+        id: string
+        type: "goal.updated"
+        properties: {
+          projectID: string
+          directory: string
+          goals: Array<Goal>
         }
       }
     | {
@@ -2916,6 +2943,7 @@ export type V2Event =
   | QuestionV2Replied
   | QuestionV2Rejected
   | TodoUpdated
+  | GoalUpdated
   | LspUpdated
   | PermissionAsked
   | PermissionReplied
@@ -3161,6 +3189,14 @@ export type QuestionV2Tool = {
 }
 
 export type QuestionV2Answer = Array<string>
+
+export type GoalStatus = "active" | "completed" | "abandoned"
+
+export type GoalTime = {
+  created: number
+  updated: number
+  completed?: number
+}
 
 export type ProjectVcs = "git"
 
@@ -5676,6 +5712,25 @@ export type TodoUpdated = {
   }
 }
 
+export type GoalUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "goal.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    projectID: string
+    directory: string
+    goals: Array<Goal>
+  }
+}
+
 export type LspUpdated = {
   id: string
   metadata?: {
@@ -6845,6 +6900,16 @@ export type EventTodoUpdated = {
   properties: {
     sessionID: string
     todos: Array<Todo>
+  }
+}
+
+export type EventGoalUpdated = {
+  id: string
+  type: "goal.updated"
+  properties: {
+    projectID: string
+    directory: string
+    goals: Array<Goal>
   }
 }
 
@@ -8823,6 +8888,34 @@ export type ProjectUpdateResponses = {
 }
 
 export type ProjectUpdateResponse = ProjectUpdateResponses[keyof ProjectUpdateResponses]
+
+export type ProjectGoalsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/goal"
+}
+
+export type ProjectGoalsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProjectGoalsError = ProjectGoalsErrors[keyof ProjectGoalsErrors]
+
+export type ProjectGoalsResponses = {
+  /**
+   * Goals for the active project and directory
+   */
+  200: Array<Goal>
+}
+
+export type ProjectGoalsResponse = ProjectGoalsResponses[keyof ProjectGoalsResponses]
 
 export type ProjectDirectoriesData = {
   body?: never
