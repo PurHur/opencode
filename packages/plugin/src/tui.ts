@@ -390,6 +390,7 @@ export type TuiState = {
     diff: (sessionID: string) => ReadonlyArray<TuiSidebarFileItem>
     todo: (sessionID: string) => ReadonlyArray<TuiSidebarTodoItem>
     goal: (sessionID: string) => ReadonlyArray<TuiSidebarGoalItem>
+    children: (sessionID: string) => ReadonlyArray<TuiSidebarChildSession>
     messages: (sessionID: string) => ReadonlyArray<Message>
     status: (sessionID: string) => SessionStatus | undefined
     permission: (sessionID: string) => ReadonlyArray<PermissionRequest>
@@ -448,6 +449,11 @@ export type TuiSidebarLspItem = Pick<LspStatus, "id" | "root" | "status">
 
 export type TuiSidebarTodoItem = Pick<Todo, "content" | "status">
 export type TuiSidebarGoalItem = Pick<Goal, "content" | "status">
+export type TuiSidebarChildSession = {
+  id: string
+  title: string
+  status: "running" | "idle"
+}
 
 export type TuiSidebarFileItem = {
   file: string
