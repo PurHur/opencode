@@ -113,7 +113,12 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
 
     setStore(
       produce((draft) => {
-        const lock = pick(kv.get("theme_mode_lock"))
+        // OPENCODE_THEME_MODE forces (and locks) the mode synchronously at startup,
+        // bypassing async KV load and terminal background detection entirely. Set it
+        // when detection is unreliable (e.g. inside screen/tmux, which drops the OSC
+        // background query and can force a light palette onto a dark terminal).
+        const envMode = pick(process.env["OPENCODE_THEME_MODE"])
+        const lock = envMode ?? pick(kv.get("theme_mode_lock"))
         const mode = lock ?? pick(renderer.themeMode) ?? props.mode
         if (!lock && pick(kv.get("theme_mode")) !== undefined) kv.set("theme_mode", undefined)
         draft.mode = mode
@@ -130,17 +135,17 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     })
 
     // KV loads its file asynchronously, so init() above runs before the store is
-    // populated and a persisted theme_mode_lock reads back as undefined. Re-apply
-    // it once KV is ready so a locked mode survives restarts (otherwise terminal
-    // background detection — which fails inside screen/tmux — wins and can force a
-    // light palette onto a dark terminal).
+    // populated and a persisted theme_mode_lock reads back as undefined. Gate on
+    // the kv.ready SIGNAL (guaranteed to re-run this effect once the file is read)
+    // and re-apply the persisted lock, so a locked mode survives restarts even
+    // when terminal background detection — which fails inside screen/tmux — would
+    // otherwise force a light palette onto a dark terminal.
     createEffect(() => {
+      if (!kv.ready) return
       const lock = pick(kv.get("theme_mode_lock"))
       if (!lock) return
-      if (store.lock === lock && store.mode === lock) return
-      setStore("lock", lock)
-      setStore("mode", lock)
-      refreshSystemTheme(lock)
+      if (store.lock !== lock) setStore("lock", lock)
+      if (store.mode !== lock) setStore("mode", lock)
     })
 
     function syncCustomThemes() {
