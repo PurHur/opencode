@@ -60,6 +60,14 @@ A single `goal` tool with `action: add | complete | abandon | list`. Goals are
 stored per project (SQLite), persist across sessions, and are re-surfaced to the
 model each turn so long-running objectives don't get lost.
 
+### Sidebar panels: Goals & Subagents
+
+Two new right-sidebar panels (alongside Todo / LSP / context):
+
+- **Goals** — the current project's active goals.
+- **Subagents** — the current session's active child sessions: running `task`
+  subagents *and* `workflow` steps, with live status.
+
 ### 4. Small / local model support
 
 - `examples/small-model-config.jsonc` — a commented config for a local
