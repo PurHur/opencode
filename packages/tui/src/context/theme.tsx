@@ -129,6 +129,20 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
       if (theme) setStore("active", theme)
     })
 
+    // KV loads its file asynchronously, so init() above runs before the store is
+    // populated and a persisted theme_mode_lock reads back as undefined. Re-apply
+    // it once KV is ready so a locked mode survives restarts (otherwise terminal
+    // background detection — which fails inside screen/tmux — wins and can force a
+    // light palette onto a dark terminal).
+    createEffect(() => {
+      const lock = pick(kv.get("theme_mode_lock"))
+      if (!lock) return
+      if (store.lock === lock && store.mode === lock) return
+      setStore("lock", lock)
+      setStore("mode", lock)
+      refreshSystemTheme(lock)
+    })
+
     function syncCustomThemes() {
       return themes
         .discover()
