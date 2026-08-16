@@ -181,3 +181,16 @@ DRY sampling in particular is very effective at killing verbatim loops.
 degenerates into a back-to-back repetition, opencode detects it and aborts that step with a
 clear error instead of running to the token cap and poisoning the context. Set
 `OPENCODE_LOOP_GUARD=0` to disable the guard.
+
+## Disable auto-compaction
+
+opencode auto-compacts (summarizes) a session when the context fills up. With a small
+model the auto-summary itself tends to derail (see "Repetition loops" above), and it runs
+on every continued session too. To turn it off, add to your config:
+
+```json
+{ "compaction": { "auto": false } }
+```
+
+With it off, a session that exceeds the context window raises a context-overflow error
+instead of silently summarizing; run `/compact` manually when you actually want to condense.

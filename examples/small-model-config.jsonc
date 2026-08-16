@@ -14,6 +14,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
+  // Auto-compaction summarizes the session when context fills. Small models tend to
+  // produce derailed/looping summaries, so disable it and /compact manually instead.
+  "compaction": { "auto": false },
+
   // Primary model the agent drives with. Format is "<provider>/<model>", where
   // "llama.cpp" matches the provider key defined below and "<MODEL>" matches a
   // key under provider.llama.cpp.models.
