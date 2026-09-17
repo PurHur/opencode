@@ -99,7 +99,47 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
+const DECIDE_ENV = ["EXPERIENTIAL_API_KEY", "TYPESAFE_API_KEY", "OPENCODE_AUTH_CONTENT"]
+const withDecideKey =
+  (key: string | undefined) =>
+  <A, E, R>(self: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const saved = Object.fromEntries(DECIDE_ENV.map((k) => [k, process.env[k]]))
+        for (const k of DECIDE_ENV) delete process.env[k]
+        process.env.OPENCODE_AUTH_CONTENT = "{}"
+        if (key) process.env.EXPERIENTIAL_API_KEY = key
+        return saved
+      }),
+      () => self,
+      (saved) =>
+        Effect.sync(() => {
+          for (const k of DECIDE_ENV) {
+            if (saved[k] === undefined) delete process.env[k]
+            else process.env[k] = saved[k]
+          }
+        }),
+    )
+
 describe("tool.registry", () => {
+  it.instance("hides decide when no decision-model key is configured", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+
+      expect(ids).not.toContain("decide")
+    }).pipe(withDecideKey(undefined)),
+  )
+
+  it.instance("exposes decide when EXPERIENTIAL_API_KEY is set", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+
+      expect(ids).toContain("decide")
+    }).pipe(withDecideKey("xpl_test")),
+  )
+
   it.instance("does not expose task_status", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

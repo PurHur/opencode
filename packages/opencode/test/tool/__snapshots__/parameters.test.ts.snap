@@ -464,3 +464,81 @@ exports[`tool parameters JSON Schema (wire shape) write 1`] = `
   "type": "object",
 }
 `;
+
+exports[`tool parameters JSON Schema (wire shape) decide 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "model": {
+      "description": "Decision model id. Defaults to the configured model ("jev-latest"). Rarely needed.",
+      "type": "string",
+    },
+    "questions": {
+      "additionalProperties": {
+        "properties": {
+          "criteria": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                    },
+                    {
+                      "type": "null",
+                    },
+                  ],
+                },
+                "type": "object",
+              },
+              {
+                "items": {
+                  "type": "string",
+                },
+                "type": "array",
+              },
+            ],
+            "description": "choice: REQUIRED object {option: description|null}. score: REQUIRED array of >=2 level descriptions, lowest first. noul: optional {"true": "...", "false": "..."}",
+          },
+          "instructions": {
+            "description": "The question to evaluate against the state, phrased as a single clear judgment",
+            "type": "string",
+          },
+          "type": {
+            "description": ""noul" = yes/no probability, "choice" = pick one option, "score" = rate on an ordered rubric",
+            "enum": [
+              "noul",
+              "choice",
+              "score",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "instructions",
+        ],
+        "type": "object",
+      },
+      "description": "Map of question id -> question. Ids are yours; answers come back under the same ids. Example: {"risky": {"type": "noul", "instructions": "Is this change risky to merge?"}}",
+      "type": "object",
+    },
+    "state": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "type": "object",
+        },
+      ],
+      "description": "The content to judge: a diff, log, spec, file, list of candidates, or a JSON object. Everything the decision needs must be in here",
+    },
+  },
+  "required": [
+    "state",
+    "questions",
+  ],
+  "type": "object",
+}
+`;

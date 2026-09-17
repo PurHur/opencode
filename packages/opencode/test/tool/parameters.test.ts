@@ -10,6 +10,7 @@ import { ToolJsonSchema } from "../../src/tool/json-schema"
 // provider-compatible while tools use Effect Schema internally.
 
 import { Parameters as ApplyPatch } from "../../src/tool/apply_patch"
+import { Parameters as Decide } from "../../src/tool/decide"
 import { Parameters as Edit } from "../../src/tool/edit"
 import { Parameters as Glob } from "../../src/tool/glob"
 import { Parameters as Grep } from "../../src/tool/grep"
@@ -38,6 +39,7 @@ describe("tool parameters", () => {
   describe("JSON Schema (wire shape)", () => {
     test("apply_patch", () => expect(toJsonSchema(ApplyPatch)).toMatchSnapshot())
     test("bash", () => expect(toJsonSchema(Shell)).toMatchSnapshot())
+    test("decide", () => expect(toJsonSchema(Decide)).toMatchSnapshot())
     test("edit", () => expect(toJsonSchema(Edit)).toMatchSnapshot())
     test("glob", () => expect(toJsonSchema(Glob)).toMatchSnapshot())
     test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
@@ -116,6 +118,36 @@ describe("tool parameters", () => {
     })
     test("rejects missing command", () => {
       expect(accepts(Shell, {})).toBe(false)
+    })
+  })
+
+  describe("decide", () => {
+    test("accepts string state with typed questions", () => {
+      const parsed = parse(Decide, {
+        state: "diff",
+        questions: {
+          risky: { type: "noul", instructions: "Risky?" },
+          pick: { type: "choice", instructions: "Which?", criteria: { a: "A", b: null } },
+          rate: { type: "score", instructions: "Rate", criteria: ["low", "high"] },
+        },
+      })
+      expect(parsed.state).toBe("diff")
+      expect(Object.keys(parsed.questions)).toEqual(["risky", "pick", "rate"])
+      expect(parsed.model).toBeUndefined()
+    })
+    test("accepts object state and model override", () => {
+      const parsed = parse(Decide, {
+        state: { a: 1 },
+        questions: { q: { type: "noul", instructions: "?" } },
+        model: "jev-next",
+      })
+      expect(parsed.state).toEqual({ a: 1 })
+      expect(parsed.model).toBe("jev-next")
+    })
+    test("rejects unknown question types and missing instructions", () => {
+      expect(accepts(Decide, { state: "x", questions: { q: { type: "rank", instructions: "?" } } })).toBe(false)
+      expect(accepts(Decide, { state: "x", questions: { q: { type: "noul" } } })).toBe(false)
+      expect(accepts(Decide, { state: "x" })).toBe(false)
     })
   })
 

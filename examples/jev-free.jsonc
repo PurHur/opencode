@@ -1,0 +1,17 @@
+{
+  // Free chat model from OpenCode Zen (no login required) + Jev decisions.
+  // Set EXPERIENTIAL_API_KEY in your environment (or `opencode auth login` -> Other -> "experiential"),
+  // and the `decide` tool appears automatically. See docs/jev-decisions.md.
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/minimax-m2.5-free",
+  "small_model": "opencode/minimax-m2.5-free",
+  "provider": {
+    "experiential": {
+      "options": {
+        // Optional overrides. The key can also come from EXPERIENTIAL_API_KEY.
+        "baseURL": "https://api.experientiallabs.ai/v1",
+        "decisionModel": "jev-latest"
+      }
+    }
+  }
+}

@@ -13,11 +13,14 @@ import { TaskTool } from "./task"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
+import { DecideTool, resolve as resolveDecide } from "./decide"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
+import { Auth } from "@/auth"
+import { Env } from "@/env"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
 import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Schema } from "effect"
@@ -92,6 +95,8 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    const auth = yield* Auth.Service
+    const env = yield* Env.Service
     const plugin = yield* Plugin.Service
     const agents = yield* Agent.Service
     const truncate = yield* Truncate.Service
@@ -106,6 +111,7 @@ const layer = Layer.effect(
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
     const webfetch = yield* WebFetchTool
+    const decide = yield* DecideTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
     const globtool = yield* GlobTool
@@ -204,6 +210,9 @@ const layer = Layer.effect(
         }
 
         yield* config.get()
+        // `decide` (Jev / TypeSafe decision model) only shows up when a key is
+        // configured, so sessions without one never see a tool they cannot use.
+        const decideEnabled = Boolean(yield* resolveDecide({ config, auth, env }).pipe(Effect.orElseSucceed(() => undefined)))
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -216,6 +225,7 @@ const layer = Layer.effect(
           write: Tool.init(writetool),
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
+          decide: Tool.init(decide),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
           skill: Tool.init(skilltool),
@@ -239,6 +249,7 @@ const layer = Layer.effect(
             tool.write,
             tool.task,
             tool.fetch,
+            ...(decideEnabled ? [tool.decide] : []),
             tool.todo,
             tool.search,
             tool.skill,
@@ -429,6 +440,8 @@ export const node = LayerNode.make({
   layer,
   deps: [
     Config.node,
+    Auth.node,
+    Env.node,
     Plugin.node,
     Question.node,
     Todo.node,

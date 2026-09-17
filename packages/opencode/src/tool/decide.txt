@@ -1,0 +1,15 @@
+- Asks Jev, TypeSafe's System One decision model, one or more typed questions about a piece of state
+- Returns calibrated probabilities, not prose: use it when you need a number you can threshold, a pick from a fixed set, or a rating on a rubric
+- Jev is not a chat model: it cannot write code, explain, or generate text. Put everything it needs to judge inside `state`
+
+Question types (each entry in `questions` is keyed by an id you choose; answers come back under the same ids):
+  - "noul": a yes/no question. Answer is `noul`, the probability (0..1) that the answer is yes. Optional `criteria`: {"true": "...", "false": "..."}
+  - "choice": pick one option. `criteria` is REQUIRED: an object mapping each option to a short description (or null). Answer is `choice`, `probabilities` per option, and `confidence`
+  - "score": rate on an ordered rubric. `criteria` is REQUIRED: an array of at least two level descriptions, lowest first. Answer is `score` (0 = first level, N-1 = last), `probabilities` per level, and `confidence`
+
+Usage notes:
+  - Good fits: "is this diff risky?", "which of these files should I edit first?", "how well does this output satisfy the spec?", "is this test flaky or broken?", triage, classification, ranking, gating a risky action on confidence
+  - Ask several questions in one call: they all evaluate the same `state`, and one call is cheaper than many
+  - `state` may be a string or a JSON object. Keep it focused: paste the diff, log, spec, or list the decision is about. Roughly 30k tokens of state and questions is the documented limit
+  - Read `confidence` on choice and score answers: below ~0.5 the model is unsure, so verify or ask the user instead of acting
+  - This tool is read-only and has no side effects
